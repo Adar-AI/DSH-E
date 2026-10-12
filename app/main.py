@@ -63,7 +63,21 @@ def create_app(
 
         @app.get("/", include_in_schema=False)
         def index() -> FileResponse:
+            """客户对话页。"""
             return FileResponse(str(WEB_DIR / "index.html"))
+
+        @app.get("/admin", include_in_schema=False)
+        def admin() -> FileResponse:
+            """人工客服工单台。"""
+            return FileResponse(str(WEB_DIR / "admin.html"))
+
+    # 客户上传的图片：只暴露 uploads 目录，供对话历史回显
+    settings.ensure_dirs()
+    app.mount(
+        "/uploads",
+        StaticFiles(directory=str(settings.upload_path)),
+        name="uploads",
+    )
 
     return app
 

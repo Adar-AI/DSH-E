@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from app import db as dbmod
 from app.config import get_settings
-from app.tickets.service import STATUS_ORDER, TicketService
+from app.tickets.service import EDITABLE_FIELDS, STATUS_ORDER, TicketService
 
 router = APIRouter(prefix="/api", tags=["tickets"])
 
@@ -33,6 +33,16 @@ def _with_service(handler):
 class StatusUpdate(BaseModel):
     to_status: str = Field(..., description="目标状态：待处理 / 处理中 / 已解决 / 已关闭")
     note: str = Field("", description="变更备注")
+    operator: str = Field("客服", description="操作人")
+
+
+class FieldUpdate(BaseModel):
+    fields: dict[str, str] = Field(
+        ...,
+        description="要修改的字段（customer_request / product_model / fault_phenomenon / "
+        "error_info / tried_actions / urgency / suggestion）",
+    )
+    note: str = Field("", description="备注；留空则自动记录字段变化")
     operator: str = Field("客服", description="操作人")
 
 
@@ -109,6 +119,30 @@ def update_ticket(ticket_id: int, payload: StatusUpdate):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         ticket["events"] = service.events(ticket_id)
+        return ticket
+
+    return handler()
+
+
+@router.patch("/tickets/{ticket_id}/fields")
+def update_ticket_fields(ticket_id: int, payload: FieldUpdate):
+    """人工修正工单字段（AI 抽取难免有偏差，人工可覆盖，改动记入时间线）。"""
+
+    @_with_service
+    def handler(service: TicketService):
+        try:
+            ticket = service.update_fields(
+                ticket_id,
+                payload.fields,
+                note=payload.note,
+                operator=payload.operator,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        ticket["events"] = service.events(ticket_id)
+        ticket["editable_fields"] = list(EDITABLE_FIELDS)
         return ticket
 
     return handler()

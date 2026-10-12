@@ -209,6 +209,76 @@ def test_patch_status_requires_target(client):
     assert http.patch(f"/api/tickets/{ticket['id']}", json={}).status_code == 422
 
 
+# ------------------------------------------------------------------ 字段编辑
+
+def test_patch_fields_updates_and_logs_event(client):
+    http, _ = client
+    ticket = http.post(f"/api/conversations/{seed_conversation(http)}/close").json()
+    before = len(ticket["events"])
+
+    response = http.patch(
+        f"/api/tickets/{ticket['id']}/fields",
+        json={"fields": {"product_model": "L3260", "urgency": "紧急"}, "operator": "小王"},
+    )
+
+    assert response.status_code == 200
+    updated = response.json()
+    assert updated["product_model"] == "L3260"
+    assert updated["urgency"] == "紧急"
+    assert updated["status"] == "待处理", "改字段不应改变状态"
+    assert len(updated["events"]) == before + 1
+    assert "产品型号" in updated["events"][-1]["note"]
+    assert "L3260" in updated["events"][-1]["note"]
+    assert updated["editable_fields"] == [
+        "customer_request",
+        "product_model",
+        "fault_phenomenon",
+        "error_info",
+        "tried_actions",
+        "urgency",
+        "suggestion",
+    ]
+
+    detail = http.get(f"/api/tickets/{ticket['id']}").json()
+    assert detail["product_model"] == "L3260"
+
+
+def test_patch_fields_rejects_unknown_field(client):
+    http, _ = client
+    ticket = http.post(f"/api/conversations/{seed_conversation(http)}/close").json()
+
+    response = http.patch(
+        f"/api/tickets/{ticket['id']}/fields",
+        json={"fields": {"status": "已关闭"}},
+    )
+
+    assert response.status_code == 400
+    assert "不可编辑的字段" in response.json()["detail"]
+
+
+def test_patch_fields_rejects_invalid_urgency(client):
+    http, _ = client
+    ticket = http.post(f"/api/conversations/{seed_conversation(http)}/close").json()
+
+    response = http.patch(
+        f"/api/tickets/{ticket['id']}/fields",
+        json={"fields": {"urgency": "特急"}},
+    )
+
+    assert response.status_code == 400
+    assert "紧急程度只能是" in response.json()["detail"]
+
+
+def test_patch_fields_unknown_ticket(client):
+    http, _ = client
+
+    response = http.patch(
+        "/api/tickets/99999/fields", json={"fields": {"product_model": "X"}}
+    )
+
+    assert response.status_code == 404
+
+
 # ------------------------------------------------------------------ 导出
 
 def test_export_csv(client):

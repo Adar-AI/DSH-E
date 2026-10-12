@@ -111,6 +111,17 @@ Test-Step '静态首页可访问' {
     Assert-True ($page.Content -match '智能客服') '首页内容不含项目名'
 }
 
+Test-Step '前端资源与页面齐全' {
+    $targets = @('/', '/admin', '/static/selftest.html', '/static/css/app.css',
+                 '/static/js/api.js', '/static/js/ui.js', '/static/js/chat.js',
+                 '/static/js/admin.js', '/static/js/selftest.js')
+    foreach ($target in $targets) {
+        $response = Invoke-WebRequest -Uri "$BaseUrl$target" -TimeoutSec 30
+        Assert-True ($response.StatusCode -eq 200) "$target 返回 $($response.StatusCode)"
+        Assert-True ($response.RawContentLength -gt 0) "$target 内容为空"
+    }
+}
+
 # ---------------------------------------------------------------- 文字对话
 
 $conversationId = $null
@@ -237,6 +248,30 @@ Test-Step '非法流转被拒绝（已解决 → 待处理）' {
     }
     catch { $failed = $true }
     Assert-True $failed '非法流转居然成功了'
+}
+
+# ---------------------------------------------------------------- 字段编辑
+
+Test-Step '人工修正工单字段并记入时间线' {
+    $before = (Invoke-RestMethod -Uri "$BaseUrl/api/tickets/$($script:ticket.id)" -TimeoutSec 30).events.Count
+    $updated = Invoke-RestMethod -Uri "$BaseUrl/api/tickets/$($script:ticket.id)/fields" -Method Patch `
+        -ContentType 'application/json' `
+        -Body '{"fields":{"product_model":"L3260","urgency":"紧急"},"operator":"小王"}' -TimeoutSec 30
+    Assert-True ($updated.product_model -eq 'L3260') "型号未更新：$($updated.product_model)"
+    Assert-True ($updated.urgency -eq '紧急') "紧急程度未更新：$($updated.urgency)"
+    Assert-True ($updated.status -eq '已解决') '改字段不应改变状态'
+    Assert-True ($updated.events.Count -eq $before + 1) '字段修改没有记入事件时间线'
+    Assert-True ($updated.events[-1].note -match '产品型号') "事件备注异常：$($updated.events[-1].note)"
+}
+
+Test-Step '修改不可编辑字段被拒绝' {
+    $rejected = $false
+    try {
+        Invoke-RestMethod -Uri "$BaseUrl/api/tickets/$($script:ticket.id)/fields" -Method Patch `
+            -ContentType 'application/json' -Body '{"fields":{"status":"已关闭"}}' -TimeoutSec 30 | Out-Null
+    }
+    catch { $rejected = $true }
+    Assert-True $rejected '不可编辑的字段居然修改成功'
 }
 
 # ---------------------------------------------------------------- 导出与留存

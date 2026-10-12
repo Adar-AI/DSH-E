@@ -238,6 +238,66 @@ def test_transition_table_covers_all_statuses():
         assert targets <= set(ALLOWED_TRANSITIONS)
 
 
+# ------------------------------------------------------------------ 字段编辑
+
+def test_update_fields_edits_and_records_event(service, conversation):
+    ticket = service.create_from_conversation(conversation, chat_chain=None)
+
+    updated = service.update_fields(
+        ticket["id"], {"product_model": "L3260", "urgency": "紧急"}, operator="小王"
+    )
+
+    assert updated["product_model"] == "L3260"
+    assert updated["urgency"] == "紧急"
+    event = service.events(ticket["id"])[-1]
+    assert event["from_status"] == event["to_status"] == STATUS_PENDING, "字段修改不改变状态"
+    assert "产品型号" in event["note"] and "L3260" in event["note"]
+    assert "小王" in event["note"]
+
+
+def test_update_fields_can_clear_a_field(service, conversation):
+    ticket = service.create_from_conversation(conversation, chat_chain=None)
+
+    updated = service.update_fields(ticket["id"], {"error_info": ""})
+
+    assert updated["error_info"] == ""
+    assert "报错信息" in service.events(ticket["id"])[-1]["note"]
+
+
+def test_update_fields_rejects_unknown_field(service, conversation):
+    ticket = service.create_from_conversation(conversation, chat_chain=None)
+
+    with pytest.raises(ValueError) as error:
+        service.update_fields(ticket["id"], {"status": "已关闭"})
+
+    assert "不可编辑的字段" in str(error.value)
+    assert service.get(ticket["id"])["status"] == STATUS_PENDING
+
+
+def test_update_fields_rejects_invalid_urgency(service, conversation):
+    ticket = service.create_from_conversation(conversation, chat_chain=None)
+
+    with pytest.raises(ValueError) as error:
+        service.update_fields(ticket["id"], {"urgency": "很急很急"})
+
+    assert "紧急程度只能是" in str(error.value)
+
+
+def test_update_fields_noop_keeps_events_unchanged(service, conversation):
+    ticket = service.create_from_conversation(conversation, chat_chain=None)
+    before = len(service.events(ticket["id"]))
+
+    same = service.update_fields(ticket["id"], {"product_model": ticket["product_model"]})
+
+    assert same["product_model"] == ticket["product_model"]
+    assert len(service.events(ticket["id"])) == before, "没有实际变化就不该写事件"
+
+
+def test_update_fields_unknown_ticket(service):
+    with pytest.raises(LookupError):
+        service.update_fields(99999, {"product_model": "X"})
+
+
 # ------------------------------------------------------------------ 导出
 
 def test_export_csv_has_bom_headers_and_rows(service, conversation):

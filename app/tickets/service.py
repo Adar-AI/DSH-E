@@ -37,6 +37,29 @@ STATUS_CLOSED = "已关闭"
 
 STATUS_ORDER = (STATUS_PENDING, STATUS_WORKING, STATUS_RESOLVED, STATUS_CLOSED)
 
+# 允许人工修改的字段（错误码、型号、诉求、现象、已尝试操作、紧急程度、建议）
+EDITABLE_FIELDS = (
+    "customer_request",
+    "product_model",
+    "fault_phenomenon",
+    "error_info",
+    "tried_actions",
+    "urgency",
+    "suggestion",
+)
+
+FIELD_LABELS = {
+    "customer_request": "客户诉求",
+    "product_model": "产品型号",
+    "fault_phenomenon": "故障现象",
+    "error_info": "报错信息",
+    "tried_actions": "已尝试操作",
+    "urgency": "紧急程度",
+    "suggestion": "处理建议",
+}
+
+URGENCY_CHOICES = ("普通", "较急", "紧急")
+
 ALLOWED_TRANSITIONS: dict[str, set[str]] = {
     STATUS_PENDING: {STATUS_WORKING, STATUS_CLOSED},
     STATUS_WORKING: {STATUS_RESOLVED, STATUS_CLOSED, STATUS_PENDING},
@@ -284,6 +307,68 @@ class TicketService:
             """,
             (int(ticket_id), from_status, to_status, note or None, now_iso()),
         )
+
+    # -------------------------------------------------------------- 字段编辑
+
+    def update_fields(
+        self,
+        ticket_id: int,
+        fields: dict[str, Any],
+        *,
+        note: str = "",
+        operator: str = "客服",
+    ) -> dict[str, Any]:
+        """人工修正 AI 抽取的字段。
+
+        只允许白名单字段；紧急程度必须是三个取值之一；改动逐条记入事件时间线
+        （事件用「当前状态 → 当前状态」表示这是一次字段修改，而非状态流转）。
+        """
+        ticket = self.get(ticket_id)
+        if ticket is None:
+            raise LookupError("工单不存在")
+
+        unknown = [key for key in fields if key not in EDITABLE_FIELDS]
+        if unknown:
+            raise ValueError(
+                f"不可编辑的字段：{'、'.join(unknown)}；"
+                f"可编辑字段：{'、'.join(EDITABLE_FIELDS)}"
+            )
+
+        sets: list[str] = []
+        params: list[Any] = []
+        changes: list[str] = []
+        for key, value in fields.items():
+            text = "" if value is None else str(value).strip()
+            if key == "urgency" and text and text not in URGENCY_CHOICES:
+                raise ValueError(f"紧急程度只能是：{'、'.join(URGENCY_CHOICES)}")
+
+            previous = str(ticket.get(key) or "")
+            if text == previous:
+                continue
+            sets.append(f"{key} = ?")
+            params.append(text)
+            changes.append(
+                f"{FIELD_LABELS.get(key, key)}「{previous or '空'}」→「{text or '空'}」"
+            )
+
+        if not sets:
+            return ticket
+
+        sets.append("updated_at = ?")
+        params.append(now_iso())
+        params.append(int(ticket_id))
+        self.conn.execute(f"UPDATE tickets SET {', '.join(sets)} WHERE id = ?", params)
+
+        current_status = str(ticket["status"])
+        self._add_event(
+            ticket_id,
+            current_status,
+            current_status,
+            note=note or f"{operator} 修改字段：" + "；".join(changes),
+        )
+        self.conn.commit()
+        logger.info("工单 %s 字段已修改：%s", ticket.get("ticket_no"), "；".join(changes))
+        return self.get(int(ticket_id)) or {}
 
     # ------------------------------------------------------------------ 导出
 
