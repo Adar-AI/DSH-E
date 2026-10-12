@@ -69,7 +69,7 @@ class Settings(BaseSettings):
     # --- 检索参数 ---
     retrieve_top_k: int = 4
     retrieve_candidates: int = 12
-    retrieve_min_score: float = 0.25
+    retrieve_min_score: float = 0.35
     chunk_size: int = 450
     chunk_overlap: int = 80
 

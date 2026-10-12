@@ -9,16 +9,6 @@ from app.rag.tokenize import build_match_query, segment
 from app.utils import now_iso
 
 
-@pytest.fixture()
-def conn(settings):
-    connection = dbmod.connect(settings=settings)
-    dbmod.init_db(connection, settings=settings)
-    try:
-        yield connection
-    finally:
-        connection.close()
-
-
 def _insert_document(connection, filename="产品手册.pdf", sha="sha-1", source="sample"):
     connection.execute(
         "INSERT INTO documents(filename, sha256, source, uploaded_at) VALUES (?, ?, ?, ?)",

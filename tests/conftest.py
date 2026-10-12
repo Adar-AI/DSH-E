@@ -9,15 +9,22 @@
 from __future__ import annotations
 
 import shutil
+import sys
 import uuid
 from pathlib import Path
 
 import pytest
 
+from app import db as dbmod
 from app.config import Settings
 
 ROOT = Path(__file__).resolve().parent.parent
+TESTS_DIR = Path(__file__).resolve().parent
 TEST_TMP_ROOT = ROOT / "data" / "test_tmp"
+
+# 让测试文件可以直接 `from fakes import ...`
+if str(TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(TESTS_DIR))
 
 
 @pytest.fixture()
@@ -34,10 +41,32 @@ def work_dir() -> Path:
 
 @pytest.fixture()
 def settings(work_dir: Path) -> Settings:
-    """隔离到临时目录的配置：不读 .env，不碰真实的 data/app.db。"""
+    """隔离到临时目录的配置：不读 .env，不碰真实的 data/app.db。
+
+    `embedding_dim` 取 64，与测试用假嵌入器（HashEmbedder）的维度一致；
+    真实的 BGE-M3（1024 维）由 tests/test_embedder.py 单独验证。
+    """
     return Settings(
         _env_file=None,
         db_path=work_dir / "app.db",
         upload_dir=work_dir / "uploads",
         docs_dir=work_dir / "docs",
+        embedding_dim=64,
     )
+
+
+@pytest.fixture()
+def small_chunk_settings(settings: Settings) -> Settings:
+    """小块配置：让短文档也能产生多个分块，便于验证分块与覆盖逻辑。"""
+    return settings.model_copy(update={"chunk_size": 60, "chunk_overlap": 10})
+
+
+@pytest.fixture()
+def conn(settings: Settings):
+    """已建表的临时数据库连接。"""
+    connection = dbmod.connect(settings=settings)
+    dbmod.init_db(connection, settings=settings)
+    try:
+        yield connection
+    finally:
+        connection.close()
