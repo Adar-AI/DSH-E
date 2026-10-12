@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>前端自检 · 多模态企业智能客服</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <style>
+    .log {
+      height: 460px;
+      overflow-y: auto;
+      padding: 12px 14px;
+      font-family: var(--mono);
+      font-size: 12.5px;
+      line-height: 1.7;
+      background: var(--brand-mist);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-control);
+    }
+    .log-head {
+      margin: 12px 0 4px;
+      font-weight: 700;
+      color: var(--brand-deep);
+    }
+    .log-head:first-child { margin-top: 0; }
+    .log-line.ok { color: #047857; }
+    .log-line.warn { color: #b45309; }
+    .log-line.error { color: #b91c1c; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">云</span>云打售后智能客服</div>
+      <nav class="nav">
+        <a href="/">客户对话</a>
+        <a href="/admin">工单台</a>
+        <a href="/docs">接口文档</a>
+      </nav>
+      <div class="topbar-right">
+        <span class="badge badge-muted" id="summary">尚未自检</span>
+      </div>
+    </header>
+
+    <div style="padding:var(--gap);display:flex;flex-direction:column;gap:12px">
+      <section class="panel">
+        <div class="panel-title">前端链路自检</div>
+        <div class="panel-body">
+          <p class="muted" style="margin-top:0;font-size:13px">
+            不打开开发者工具，直接确认「浏览器 ↔ 后端 ↔ 模型」是否通畅：
+            健康状态 → 知识库规模 → 真实 SSE 流式对话（事件序列 / 首包耗时）→ 工单接口。
+            服务不可用、知识库为空、模型未启动、流式链路中断，都会在这里显出具体原因。
+          </p>
+          <div class="composer-row">
+            <input id="question" class="input" value="打印机报错E05怎么处理" placeholder="自检用的提问" />
+            <button id="btn-run" class="btn btn-primary" type="button">开始自检</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">自检输出</div>
+        <div class="panel-body">
+          <div class="log" id="log"></div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <script src="/static/js/selftest.js"></script>
+</body>
+</html>

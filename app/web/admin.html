@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>工单台 · 多模态企业智能客服</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">云</span>云打售后智能客服</div>
+      <nav class="nav">
+        <a href="/">客户对话</a>
+        <a class="active" href="/admin">工单台</a>
+        <a href="/docs">接口文档</a>
+      </nav>
+      <div class="topbar-right">
+        <span class="badge badge-muted" id="ticket-count">加载中…</span>
+        <button id="btn-refresh" class="btn btn-sm" type="button">⟳ 刷新</button>
+        <button id="btn-export" class="btn btn-primary btn-sm" type="button">⬇ 导出 CSV</button>
+      </div>
+    </header>
+
+    <div class="admin-layout">
+      <main class="admin-main">
+        <div class="toolbar">
+          <div class="tabs" id="tabs"></div>
+          <input id="search" class="input search" placeholder="搜索工单号 / 诉求 / 型号 / 报错码…" />
+        </div>
+
+        <div class="table-wrap">
+          <table class="tickets">
+            <thead>
+              <tr>
+                <th>工单号</th>
+                <th>状态</th>
+                <th>紧急</th>
+                <th>型号</th>
+                <th>报错</th>
+                <th>客户诉求</th>
+                <th>更新时间</th>
+              </tr>
+            </thead>
+            <tbody id="ticket-rows"></tbody>
+          </table>
+        </div>
+      </main>
+
+      <aside class="drawer" id="drawer"></aside>
+    </div>
+
+    <div class="hint-bar">
+      🧰 工单由「结束会话」自动定稿生成；人工可修正字段、流转状态，所有改动都会记入处理历史。
+    </div>
+  </div>
+
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <script src="/static/js/admin.js"></script>
+</body>
+</html>

@@ -140,6 +140,40 @@ test('本地数据目录结构就绪', () => {
   assert.ok(fs.existsSync(path.join(ROOT, 'data/docs/user/.gitkeep')), '缺少 data/docs/user/');
 });
 
+test('前端页面与静态资源完整（引用的文件都存在）', () => {
+  const pages = ['app/web/index.html', 'app/web/admin.html', 'app/web/selftest.html'];
+  for (const page of pages) {
+    const html = read(page);
+    assert.match(html, /<title>[^<]+<\/title>/, `${page} 缺少标题`);
+    // 页面必须挂载到后端实际提供的静态路径
+    const assets = [...html.matchAll(/(?:href|src)="(\/static\/[^"]+)"/g)].map((m) => m[1]);
+    assert.ok(assets.length >= 2, `${page} 应当引用 CSS 与 JS 资源`);
+    for (const asset of assets) {
+      const relative = path.join('app/web', asset.replace('/static/', ''));
+      assert.ok(fs.existsSync(path.join(ROOT, relative)), `${page} 引用了不存在的资源 ${asset}`);
+    }
+  }
+  // 三个页面各自需要的挂载容器
+  assert.ok(read('app/web/index.html').includes('id="messages"'), '对话页缺少消息容器');
+  assert.ok(read('app/web/admin.html').includes('id="ticket-rows"'), '工单台缺少列表容器');
+  assert.ok(read('app/web/selftest.html').includes('id="log"'), '自检页缺少输出容器');
+});
+
+test('前端脚本不拼接 innerHTML 渲染后端数据（防 XSS）', () => {
+  for (const file of [
+    'app/web/js/chat.js',
+    'app/web/js/admin.js',
+    'app/web/js/selftest.js',
+  ]) {
+    const text = read(file);
+    assert.equal(
+      /\.innerHTML\s*=/.test(text),
+      false,
+      `${file} 不应直接赋值 innerHTML（后端/模型文本必须走 textContent / DOM 节点）`,
+    );
+  }
+});
+
 test('仓库内文本文件均为有效 UTF-8 且不含 NUL 字节', () => {
   for (const rel of walk('.')) {
     const ext = path.extname(rel).toLowerCase();

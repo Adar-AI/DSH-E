@@ -3,17 +3,103 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>多模态企业智能客服系统</title>
+  <title>客户对话 · 多模态企业智能客服</title>
   <link rel="stylesheet" href="/static/css/app.css" />
 </head>
 <body>
-  <main class="page">
-    <h1>多模态企业智能客服系统</h1>
-    <p>后端接口已就绪，界面在 M6 里程碑交付。</p>
-    <ul>
-      <li><a href="/docs">接口文档（Swagger）</a></li>
-      <li><a href="/api/health">服务健康状态</a></li>
-    </ul>
-  </main>
+  <div class="app">
+    <!-- ======================================================= 顶栏 -->
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">云</span>云打售后智能客服</div>
+      <nav class="nav">
+        <a class="active" href="/">客户对话</a>
+        <a href="/admin">工单台</a>
+        <a href="/docs">接口文档</a>
+      </nav>
+      <div class="topbar-right">
+        <span id="status-chat" class="badge badge-dot badge-muted">对话通道检测中…</span>
+        <span id="status-retrieval" class="badge">检索 —</span>
+        <span id="status-kb" class="badge badge-muted">知识库 —</span>
+        <button id="btn-history" class="btn btn-sm" type="button">🕘 历史会话</button>
+        <button id="btn-new" class="btn btn-sm" type="button">＋ 新会话</button>
+      </div>
+    </header>
+
+    <!-- =================================================== 对话主区域 -->
+    <div class="chat-layout">
+      <main class="chat-main">
+        <div class="chat-header">
+          <h2 id="conv-title">新会话</h2>
+          <span id="conv-id" class="badge badge-muted">未开始</span>
+          <button id="btn-close-conv" class="btn btn-primary btn-sm" type="button" style="margin-left:auto" disabled>
+            结束会话并生成工单
+          </button>
+        </div>
+
+        <div class="message-list" id="messages"></div>
+
+        <div class="composer">
+          <div class="composer-row">
+            <textarea id="input-text" class="textarea" rows="2"
+              placeholder="描述你的问题，或上传故障截图 / 实物照片…（Ctrl + Enter 发送）"></textarea>
+            <button id="btn-send" class="btn btn-primary" type="button">发送</button>
+          </div>
+          <div class="composer-tools">
+            <button id="btn-attach" class="btn btn-sm" type="button">📎 上传图片</button>
+            <input id="input-file" type="file" hidden
+              accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" />
+            <span id="thumb" class="thumb-preview" hidden></span>
+            <span class="muted" style="margin-left:auto">支持 PNG / JPG / WEBP，单张 ≤ 8MB</span>
+          </div>
+        </div>
+      </main>
+
+      <!-- =================================================== 右侧信息栏 -->
+      <aside class="sidebar">
+        <section class="panel">
+          <div class="panel-title">会话信息</div>
+          <div class="panel-body">
+            <div class="kv"><span class="k">会话 ID</span><span class="mono" id="info-id">—</span></div>
+            <div class="kv"><span class="k">消息数</span><span id="info-count">—</span></div>
+            <div class="kv"><span class="k">对话通道</span><span id="info-channel">—</span></div>
+            <div class="kv"><span class="k">检索模式</span><span id="info-mode">—</span></div>
+            <div class="kv"><span class="k">状态</span><span id="info-status" class="badge badge-muted">未开始</span></div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span>工单草稿（实时）</span>
+            <span class="badge" id="draft-count">0 / 6</span>
+          </div>
+          <div class="panel-body">
+            <div class="progress" style="margin-bottom:10px"><span id="draft-bar" style="width:0%"></span></div>
+            <dl style="margin:0" id="draft-body"></dl>
+            <p class="muted" style="margin:10px 0 0;font-size:12px">
+              对话结束后点右上角「结束会话并生成工单」，即可在工单台跟进。
+            </p>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <div class="hint-bar">
+      🔎 回答只依据企业内部资料（产品手册 / 售后规则 / 排查表）；资料没写的内容会明确说明并建议转人工。
+    </div>
+  </div>
+
+  <!-- 历史会话抽屉 -->
+  <div class="overlay" id="history-mask" hidden></div>
+  <aside class="side-drawer" id="history-drawer" hidden>
+    <div class="side-drawer-head">
+      <strong>历史会话</strong>
+      <button class="btn btn-ghost btn-sm" type="button" id="history-close">✕</button>
+    </div>
+    <div class="side-drawer-body" id="history-list"></div>
+  </aside>
+
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <script src="/static/js/chat.js"></script>
 </body>
 </html>
