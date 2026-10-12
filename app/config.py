@@ -69,6 +69,31 @@ class Settings(BaseSettings):
     # 打开后自动追加 `/no_think` 软开关；非思考模型不受影响。
     disable_thinking: bool = True
 
+    # --- 联网检索：MCP 服务 ---
+    # 定位：内部知识库高置信时**不触发**；内部不足时才联网补充，结果单独标注来源。
+    mcp_enabled: bool = True
+    mcp_base_url: str = ""
+    mcp_api_key: str = ""
+    mcp_timeout: float = 45.0
+    mcp_max_results: int = 5
+    mcp_tool_name: str = ""  # 留空则自动挑选名字里带 search 的工具
+
+    # --- 重排（Rerank）---
+    # 本地 CrossEncoder 权重路径；为空则退化为「不重排」（用融合分）
+    rerank_model_path: str = ""
+    rerank_device: str = "cpu"
+    rerank_batch_size: int = 8
+    rerank_max_length: int = 512
+    # 动态 TopK：绝对下限 + 相对断崖 + 条数上限
+    rerank_min_score: float = 0.10
+    rerank_relative_floor: float = 0.35
+    rerank_top_k_max: int = 6
+
+    # --- 三档置信判定（高置信检索 / 中置信反问 / 低置信拒答）---
+    confidence_high: float = 0.50
+    confidence_low: float = 0.10
+    clarify_max_rounds: int = 2
+
     # --- 本地对话模型（默认通道）---
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     ollama_model: str = "qwen2.5:latest"
@@ -198,6 +223,18 @@ class Settings(BaseSettings):
                 "local": is_local_url(self.effective_vision_base_url),
                 "max_side": self.vision_max_side,
                 "auto_cloud_fallback": self.vision_auto_cloud_fallback,
+            },
+            "rerank": {
+                "model_path": self.rerank_model_path or "(未配置，退化为融合分)",
+                "device": self.rerank_device,
+                "min_score": self.rerank_min_score,
+                "top_k_max": self.rerank_top_k_max,
+            },
+            "mcp_search": {
+                "enabled": self.mcp_enabled,
+                "base_url": self.mcp_base_url or "(未配置)",
+                "api_key": mask_secret(self.mcp_api_key),
+                "timeout": self.mcp_timeout,
             },
         }
 
