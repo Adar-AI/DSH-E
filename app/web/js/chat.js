@@ -214,6 +214,7 @@
       if (item.role !== 'user') {
         const bits = [UI.formatShortTime(item.created_at)];
         if (trace.provider) bits.push(`通道 ${trace.provider}`);
+        if (trace.vision_ok) bits.push(trace.vision_local ? '图片本地识别' : '图片云端识别');
         if (trace.hit === true) bits.push('命中知识库');
         if (trace.fallback_used) bits.push('未命中，已兜底');
         handle.meta.textContent = bits.join(' · ');
