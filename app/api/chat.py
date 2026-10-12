@@ -30,6 +30,7 @@ from fastapi.responses import StreamingResponse
 from app import db as dbmod
 from app.config import Settings, get_settings
 from app.deps import build_deps, get_checkpointer
+from app.handoff import HANDOFF_NOTICE, HandoffService, detect_handoff_request
 from app.graph.agent import build_graph
 from app.llm.vision import SUPPORTED_IMAGE_SUFFIXES
 from app.store import ConversationStore
@@ -56,6 +57,45 @@ def _save_image(payload: bytes, suffix: str, settings: Settings) -> str:
     target = settings.upload_path / f"{new_id('img')}{suffix}"
     target.write_bytes(payload)
     return str(target)
+
+
+def _handoff_silence(
+    handoff: HandoffService,
+    conv_id: str,
+    store: ConversationStore,
+    *,
+    text: str,
+    reason: str,
+    ticket_no: str | None = None,
+) -> Iterator[str]:
+    """人工接管期间的收尾：AI 不再回答，只把状态回给页面并落库。"""
+    state = handoff.state(conv_id)
+    if state == "requested":
+        notice = HANDOFF_NOTICE
+    else:
+        notice = "客服已接入，正在为你处理，请直接在这里回复。"
+
+    yield sse("token", {"text": notice})
+    yield sse(
+        "done",
+        {
+            "answer": notice,
+            "citations": [],
+            "conversation_id": conv_id,
+            "ticket_draft": store.get_draft(conv_id),
+            "trace": {
+                "handoff_state": state,
+                "handoff_reason": reason,
+                "ticket_no": ticket_no,
+                "handoff_used": True,
+                "provider": "",
+                "fallback_used": False,
+            },
+        },
+    )
+    # 注意：这里**不再重复落库**。
+    # requested 状态的系统提示已由 HandoffService.request() 写入（role=system）；
+    # claimed 状态下客服的发言本身就是记录。重复写会让客户看到同一句话两遍。
 
 
 def stream_chat(
@@ -90,6 +130,37 @@ def stream_chat(
         )
         # 先落用户消息：即使后面模型挂了，这轮提问也不会丢
         store.add_message(conv_id, "user", text, image_path=image_path)
+
+        # V3 转人工：人工待接入 / 人工中时 AI 必须静默，只把消息记录给客服看
+        handoff = HandoffService(conn, settings=settings, store=store)
+        if handoff.is_waiting_human(conv_id):
+            yield from _handoff_silence(
+                handoff, conv_id, store, text=text, reason="handoff:waiting"
+            )
+            return
+
+        # 客户话术要求转人工 → 立即建单并在工单台提醒；本轮不再让模型回答
+        decision = detect_handoff_request(text)
+        if decision.requested and settings.handoff_enabled:
+            outcome = handoff.request(conv_id, reason=decision.reason)
+            yield sse(
+                "handoff",
+                {
+                    "handoff_state": outcome["handoff_state"],
+                    "reason": decision.reason,
+                    "ticket_no": (outcome.get("ticket") or {}).get("ticket_no"),
+                    "notice": outcome["notice"],
+                },
+            )
+            yield from _handoff_silence(
+                handoff,
+                conv_id,
+                store,
+                text=text,
+                reason=f"handoff:requested（{decision.reason}）",
+                ticket_no=(outcome.get("ticket") or {}).get("ticket_no"),
+            )
+            return
 
         final_state: dict[str, Any] = {}
         try:

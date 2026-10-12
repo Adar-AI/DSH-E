@@ -343,3 +343,122 @@ def test_static_index_is_served(api_client):
 
     assert response.status_code == 200
     assert "多模态企业智能客服" in response.text
+
+
+# ---------------------------------------------------------------- 转人工（V3）
+
+
+def test_chat_handoff_creates_ticket_and_silences_ai(api_client):
+    """客户要求转人工：立即建单 + 系统提示，且本轮不调用模型。"""
+    client, chain, _ = api_client
+
+    events = parse_sse(client.post("/api/chat", data={"text": "我要转人工客服"}).text)
+    names = event_names(events)
+
+    assert "handoff" in names, f"缺少 handoff 事件（实际 {names}）"
+    assert "token" in names and "done" in names
+
+    handoff = event_data(events, "handoff")
+    assert handoff["handoff_state"] == "requested"
+    assert handoff["ticket_no"].startswith("T-")
+    assert "转接人工客服" in handoff["notice"]
+
+    done = event_data(events, "done")
+    assert done["trace"]["handoff_used"] is True
+    assert done["citations"] == []
+    assert chain.calls == [], "转人工时 AI 必须静默"
+
+    waiting = client.get("/api/handoffs").json()
+    assert waiting["waiting"] == 1
+    assert waiting["items"][0]["ticket_no"] == handoff["ticket_no"]
+    assert waiting["items"][0]["handoff_state"] == "requested"
+
+
+def test_handoff_agent_reply_is_visible_to_customer(api_client):
+    """客服发言入库为 agent 角色，客户页面（增量拉取）能拿到。"""
+    client, _, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "转人工"}).text)
+    item = client.get("/api/handoffs").json()["items"][0]
+    conv_id = item["id"]
+
+    before = client.get(f"/api/conversations/{conv_id}/messages").json()["items"]
+    assert before[-1]["role"] == "system"
+
+    reply = client.post(
+        f"/api/conversations/{conv_id}/agent-messages", params={"text": "我是客服小李，请问型号？"}
+    ).json()
+    assert reply["handoff_state"] == "claimed"
+    assert reply["claimed_now"] is True
+
+    incremental = client.get(
+        f"/api/conversations/{conv_id}/messages", params={"after_id": before[-1]["id"]}
+    ).json()["items"]
+    assert [entry["role"] for entry in incremental] == ["agent"]
+    assert incremental[0]["text"] == "我是客服小李，请问型号？"
+
+    # 领取后不再计入"待接入"
+    assert client.get("/api/handoffs").json()["waiting"] == 0
+
+
+def test_chat_during_handoff_stays_silent(api_client):
+    """人工中继续提问：不再检索与生成，只登记并提示等待。"""
+    client, chain, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "转人工"}).text)
+    conv_id = client.get("/api/handoffs").json()["items"][0]["id"]
+    client.post(f"/api/conversations/{conv_id}/agent-messages", params={"text": "客服在"})
+    calls_before = len(chain.calls)
+
+    events = parse_sse(
+        client.post("/api/chat", data={"text": "在吗", "conversation_id": conv_id}).text
+    )
+    done = event_data(events, "done")
+
+    assert done["trace"]["handoff_used"] is True
+    assert done["trace"]["handoff_state"] == "claimed"
+    assert "客服已接入" in done["answer"]
+    assert len(chain.calls) == calls_before, "人工期间不得调用模型"
+
+
+def test_close_after_handoff_reuses_ticket(api_client):
+    """F27：转人工时已建单，结束会话时复用同一张，不重复建单。"""
+    client, _, _ = api_client
+    events = parse_sse(client.post("/api/chat", data={"text": "我要转人工"}).text)
+    conv_id = event_data(events, "meta")["conversation_id"]
+    ticket_no = event_data(events, "handoff")["ticket_no"]
+
+    closed = client.post(f"/api/conversations/{conv_id}/close").json()
+
+    assert closed["ticket_no"] == ticket_no
+    assert closed["extraction"]["source"] == "existing"
+    tickets = client.get("/api/tickets").json()["items"]
+    assert len([item for item in tickets if item["conv_id"] == conv_id]) == 1
+
+
+def test_handoff_endpoint_for_customer_button(api_client):
+    """客户页「转人工客服」按钮走的接口。"""
+    client, chain, _ = api_client
+    conv_id = client.post("/api/conversations", params={"title": "按钮转人工"}).json()["id"]
+    client.post("/api/chat", data={"text": "打印机有点问题", "conversation_id": conv_id})
+
+    outcome = client.post(f"/api/conversations/{conv_id}/handoff").json()
+
+    assert outcome["handoff_state"] == "requested"
+    assert outcome["ticket"]["ticket_no"].startswith("T-")
+    assert any(entry["role"] == "system" for entry in outcome["messages"])
+    assert client.get("/api/handoffs").json()["waiting"] == 1
+
+
+def test_agent_reply_requires_handoff(api_client):
+    client, _, _ = api_client
+    conv_id = client.post("/api/conversations", params={"title": "未转人工"}).json()["id"]
+
+    response = client.post(
+        f"/api/conversations/{conv_id}/agent-messages", params={"text": "你好"}
+    )
+
+    assert response.status_code == 404
+
+
+def test_handoff_unknown_conversation_returns_404(api_client):
+    client, _, _ = api_client
+    assert client.post("/api/conversations/conv-missing/handoff").status_code == 404

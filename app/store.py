@@ -8,9 +8,23 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 from app.utils import new_id, now_iso
+
+
+def _seconds_since(timestamp: Any) -> int:
+    """从 ISO 时间戳算到现在的秒数（用于工单台显示"已等待多久"）。"""
+    if not timestamp:
+        return 0
+    try:
+        moment = datetime.fromisoformat(str(timestamp))
+    except (TypeError, ValueError):
+        return 0
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - moment).total_seconds()))
 
 DEFAULT_TITLE = "新会话"
 MAX_TITLE_LENGTH = 24
@@ -31,8 +45,7 @@ def _loads(value: Any, default: Any = None) -> Any:
         return default
 
 
-def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
-    return dict(row) if row is not None else None
+def _row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:    return dict(row) if row is not None else None
 
 
 class ConversationStore:
@@ -142,6 +155,63 @@ class ConversationStore:
     def set_draft(self, conversation_id: str, draft: dict[str, Any]) -> None:
         self.update(conversation_id, draft=draft)
 
+    # -------------------------------------------------------------- 转人工
+
+    def set_handoff(
+        self,
+        conversation_id: str,
+        state: str,
+        *,
+        reason: str | None = None,
+        at: str | None = None,
+    ) -> dict[str, Any]:
+        """更新转人工状态（none | requested | claimed），返回最新会话。"""
+        timestamp = now_iso()
+        self.conn.execute(
+            """
+            UPDATE conversations
+               SET handoff_state = ?,
+                   handoff_reason = COALESCE(?, handoff_reason),
+                   handoff_at = COALESCE(?, handoff_at),
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (state, reason, at, timestamp, conversation_id),
+        )
+        self.conn.commit()
+        return self.get(conversation_id) or {}
+
+    def handoff_state(self, conversation_id: str) -> str:
+        row = self.conn.execute(
+            "SELECT handoff_state FROM conversations WHERE id = ?", (conversation_id,)
+        ).fetchone()
+        return str(row["handoff_state"] or "none") if row else "none"
+
+    def pending_handoffs(self, *, states: tuple[str, ...] = ("requested", "claimed")) -> list[dict[str, Any]]:
+        """待接入 / 人工中的会话列表（客服台用），带最后一条消息与关联工单号。"""
+        placeholders = ",".join("?" for _ in states)
+        rows = self.conn.execute(
+            f"""
+            SELECT c.*,
+                   (SELECT t.ticket_no FROM tickets t WHERE t.conv_id = c.id ORDER BY t.id LIMIT 1) AS ticket_no,
+                   (SELECT m.text FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_text,
+                   (SELECT m.role FROM messages m WHERE m.conv_id = c.id ORDER BY m.id DESC LIMIT 1) AS last_role,
+                   (SELECT COUNT(*) FROM messages m WHERE m.conv_id = c.id) AS message_count
+              FROM conversations c
+             WHERE c.handoff_state IN ({placeholders})
+             ORDER BY CASE c.handoff_state WHEN 'requested' THEN 0 ELSE 1 END, c.handoff_at, c.id
+            """,
+            states,
+        ).fetchall()
+
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            data["ticket_draft"] = _loads(data.pop("ticket_draft_json", None), {})
+            data["waiting_seconds"] = _seconds_since(data.get("handoff_at"))
+            result.append(data)
+        return result
+
     def delete(self, conversation_id: str) -> bool:
         cursor = self.conn.execute(
             "DELETE FROM conversations WHERE id = ?", (conversation_id,)
@@ -187,10 +257,24 @@ class ConversationStore:
         self.conn.commit()
         return int(cursor.lastrowid or 0)
 
-    def messages(self, conversation_id: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+    def messages(
+        self,
+        conversation_id: str,
+        *,
+        limit: int | None = None,
+        after_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """按时间正序返回消息；`after_id` 用于客户页轮询增量拉取。"""
         sql = "SELECT * FROM messages WHERE conv_id = ? ORDER BY id"
         params: list[Any] = [conversation_id]
-        if limit:
+
+        if after_id is not None:
+            sql = "SELECT * FROM messages WHERE conv_id = ? AND id > ? ORDER BY id"
+            params.append(int(after_id))
+            if limit:
+                sql = "SELECT * FROM (" + sql + " LIMIT ?) ORDER BY id"
+                params.append(int(limit))
+        elif limit:
             sql = (
                 "SELECT * FROM (SELECT * FROM messages WHERE conv_id = ? "
                 "ORDER BY id DESC LIMIT ?) ORDER BY id"

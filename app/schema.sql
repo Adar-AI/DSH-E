@@ -67,9 +67,15 @@ CREATE TABLE IF NOT EXISTS conversations (
     title             TEXT,
     status            TEXT NOT NULL DEFAULT 'active',  -- active | closed
     ticket_draft_json TEXT,
+    -- V3 转人工：none | requested（客户要求人工）| claimed（客服已接入）
+    handoff_state     TEXT NOT NULL DEFAULT 'none',
+    handoff_reason    TEXT,                            -- 触发原因（话术命中词 / 客户点击按钮）
+    handoff_at        TEXT,                            -- 客户请求人工的时间
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_conversations_handoff ON conversations(handoff_state);
 
 CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
 

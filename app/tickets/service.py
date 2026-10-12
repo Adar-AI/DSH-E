@@ -299,8 +299,7 @@ class TicketService:
 
     def _add_event(
         self, ticket_id: int, from_status: str | None, to_status: str, *, note: str = ""
-    ) -> None:
-        self.conn.execute(
+    ) -> None:        self.conn.execute(
             """
             INSERT INTO ticket_events(ticket_id, from_status, to_status, note, created_at)
             VALUES (?, ?, ?, ?, ?)
@@ -309,6 +308,15 @@ class TicketService:
         )
 
     # -------------------------------------------------------------- 字段编辑
+
+    def add_timeline_note(self, ticket_id: int, note: str) -> None:
+        """只记一条时间线备注，不改状态（转人工等事件用）。"""
+        ticket = self.get(int(ticket_id))
+        if ticket is None:
+            raise LookupError("工单不存在")
+        status = str(ticket.get("status") or "待处理")
+        self._add_event(int(ticket_id), status, status, note=note)
+        self.conn.commit()
 
     def update_fields(
         self,

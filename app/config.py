@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     # 打开后自动追加 `/no_think` 软开关；非思考模型不受影响。
     disable_thinking: bool = True
 
+    # 转人工（V3）
+    handoff_enabled: bool = True
+    handoff_poll_seconds: float = 3.0
+
     # --- 联网检索：MCP 服务 ---
     # 定位：内部知识库高置信时**不触发**；内部不足时才联网补充，结果单独标注来源。
     mcp_enabled: bool = True

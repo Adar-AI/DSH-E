@@ -19,7 +19,7 @@ APP_DIR = Path(__file__).resolve().parent
 CORE_SCHEMA_PATH = APP_DIR / "schema.sql"
 VEC_SCHEMA_PATH = APP_DIR / "schema_vec.sql"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # 建库后应当存在的业务表（校验用）
 EXPECTED_TABLES = {
@@ -111,7 +111,7 @@ def init_db(
     embedding_dim: int | None = None,
     settings: Settings | None = None,
 ) -> list[str]:
-    """建表（幂等）。返回本次新建的表名列表。"""
+    """建表（幂等）+ 轻量迁移。返回本次新建的表名列表。"""
     settings = settings or get_settings()
     dim = int(embedding_dim or settings.embedding_dim)
     before = table_names(conn)
@@ -124,10 +124,47 @@ def init_db(
         )
         conn.executescript(vec_sql)
 
+    migrate(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
 
     return sorted(table_names(conn) - before)
+
+
+# 轻量迁移：老库（CREATE TABLE IF NOT EXISTS 不会补列）需要 ALTER TABLE。
+# 只做"加列"，且每次都检查列是否存在，因此可重复执行。
+_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # (表, 列, 列定义)
+    ("conversations", "handoff_state", "TEXT NOT NULL DEFAULT 'none'"),
+    ("conversations", "handoff_reason", "TEXT"),
+    ("conversations", "handoff_at", "TEXT"),
+)
+
+
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """按需补列，返回本次真正执行的迁移说明（幂等）。"""
+    applied: list[str] = []
+    for table, column, definition in _COLUMN_MIGRATIONS:
+        if not _table_exists(conn, table):
+            continue
+        if column in _columns(conn, table):
+            continue
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+        applied.append(f"{table}.{column}")
+    if applied:
+        conn.commit()
+    return applied
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone()
+    return row is not None
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
 def schema_version(conn: sqlite3.Connection) -> int:
