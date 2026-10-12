@@ -1,0 +1,9 @@
+{
+  "name": "dsh-e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSH-E 仓库的文档与校验",
+  "scripts": {
+    "test": "node test/run.js"
+  }
+}
