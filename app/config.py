@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     qwen_vision_model: str = "qwen3.5-omni-plus"
     qwen_vision_timeout: float = 60.0
 
+    # --- 模型总开关 ---
+    # auto：用真实模型（本地 Ollama → 备用通道 → 多模态网关）
+    # mock：全部换成离线确定性假模型，用于"先跑通后端逻辑"、前端联调与演示
+    llm_mode: str = "auto"
+
     # --- 本地对话模型（默认通道）---
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
     ollama_model: str = "qwen2.5:latest"

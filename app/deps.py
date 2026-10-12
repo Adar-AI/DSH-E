@@ -15,6 +15,11 @@ from typing import Any, Callable
 
 from app.config import Settings, get_settings
 from app.db import connect as db_connect
+from app.llm.mock import (
+    build_mock_chat_chain,
+    build_mock_vision_provider,
+    is_mock_mode,
+)
 from app.llm.providers import (
     ChatChain,
     OpenAICompatProvider,
@@ -95,7 +100,11 @@ def get_chat_chain(settings: Settings | None = None) -> ChatChain:
     settings = settings or get_settings()
     with _LOCK:
         if _CHAIN is None:
-            _CHAIN = build_chat_chain(settings)
+            if is_mock_mode(settings):
+                logger.warning("LLM_MODE=mock：对话通道使用离线假模型，不调用任何真实模型")
+                _CHAIN = build_mock_chat_chain(settings)  # type: ignore[assignment]
+            else:
+                _CHAIN = build_chat_chain(settings)
         return _CHAIN
 
 
@@ -104,7 +113,10 @@ def get_vision_provider(settings: Settings | None = None) -> OpenAICompatProvide
     settings = settings or get_settings()
     with _LOCK:
         if _VISION is None:
-            _VISION = build_vision_provider(settings)
+            if is_mock_mode(settings):
+                _VISION = build_mock_vision_provider(settings)  # type: ignore[assignment]
+            else:
+                _VISION = build_vision_provider(settings)
         return _VISION
 
 

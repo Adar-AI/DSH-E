@@ -1,9 +1,15 @@
 # 顺序执行两套测试：Node 文档/仓库校验 + Python 单元测试。
-# 用法：.\scripts\test.ps1
+#
+# 用法：.\scripts\test.ps1 [-Python 'x:\path\to\python.exe']
 # 说明：之所以不用 npm script 串起来，是因为受限沙箱下 Node 无法带管道派生
 #       子进程（spawn EPERM），PowerShell 直接调用两个解释器最稳。
 
+[CmdletBinding()]
+param([string]$Python = '')
+
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'resolve_python.ps1')
+
 $root = Split-Path -Parent $PSScriptRoot
 Push-Location $root
 try {
@@ -11,10 +17,11 @@ try {
     npm test
     if ($LASTEXITCODE -ne 0) { throw "npm test 失败（退出码 $LASTEXITCODE）" }
 
-    $python = (Get-Command python -ErrorAction SilentlyContinue).Source
-    if (-not $python) { $python = 'E:\PyCharmMiscProject\python.exe' }
-    Write-Host "=== 2/2 Python 单元测试（$python）===" -ForegroundColor Cyan
-    & $python -m pytest tests
+    $pythonPath = Get-ProjectPython -Override $Python
+    if (-not (Test-ProjectDependencies -Python $pythonPath)) { exit 1 }
+
+    Write-Host "=== 2/2 Python 单元测试（$pythonPath）===" -ForegroundColor Cyan
+    & $pythonPath -m pytest tests
     if ($LASTEXITCODE -ne 0) { throw "pytest 失败（退出码 $LASTEXITCODE）" }
 
     Write-Host '全部测试通过 ✔' -ForegroundColor Green
