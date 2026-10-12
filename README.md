@@ -114,6 +114,39 @@ vision: model=qwen2.5vl:3b  kind=本地 Ollama  local=true
 想更快可以：① 把视觉换成 `qwen3-vl:2b`（1.9GB，换页更快）；② 文本与视觉统一用 `gemma3:4b`（单模型双模态，零换页）；
 ③ 或保留市面上识别最好但需联网的云端视觉（把 `VISION_MODEL` 指向云端模型即可）。
 
+## 检索增强：三档置信 + 重排 + 联网兜底（v2.1）
+
+一句话：**问得不清楚就反问、资料没有就说没有、内部不够才联网**，用多层判断把幻觉挡在外面。
+
+```
+用户提问
+  ↓ ① 意图确认与改写   实体对齐（图片/草稿/历史）+ 查询改写
+  ├─ 缺主语且上下文有多个型号 → 反问澄清（列出候选，不猜不答）
+  ├─ 缺主语且无上下文型号     → 拒答（说明要补型号，可转人工）
+  └─ 明确 → 继续
+  ↓ ② 内部多路召回（多查询变体）
+  ↓ ③④⑤ RRF 融合 → 本地重排 → 动态 TopK
+  │     内部证据不足（重排分低 或 主题没覆盖）才触发 ⑥ MCP 联网兜底
+  ↓ ⑥ 生成：内部依据标 [1]，联网来源标 [网1] 并注明"仅供参考"
+```
+
+配置（`.env`，全部有默认值）：
+
+```ini
+RERANK_MODEL_PATH=D:/ai_models/modelscope_cache/models/rerank/BAAI/bge-reranker-large
+RERANK_MIN_SCORE=0.10     RERANK_RELATIVE_FLOOR=0.35
+RERANK_CLIFF_RATIO=0.5    RERANK_TOP_K_MAX=6
+CONFIDENCE_HIGH=0.50      CONFIDENCE_LOW=0.10      CLARIFY_MAX_ROUNDS=2
+LLM_ALIGN_ENABLED=false   # 边界区间是否再问一次模型（默认关，省一次调用）
+MCP_ENABLED=true          MCP_BASE_URL=<百炼 EnhancedSearch 端点>   MCP_API_KEY=<仅存 .env>
+MCP_TRIGGER_TOP1=0.35     MCP_TRIGGER_COVERAGE=0.34
+```
+
+实测（本机，真实模型）：明确问题精排 top1 **0.9967**、保留 6 条；
+「保修期是多少？」在有多个型号上下文时触发**反问**（候选 L3250/M1136）、全新会话触发**拒答**；
+场外问题走兜底；冒烟 **21/21**。阈值标定与两个真实缺陷（重排分判不出"问得清不清楚"、
+型号词把分数抬高到 0.84 导致联网不触发）的排查过程见 `docs/架构说明.md` 第 13 节。
+
 ## 页面与深链
 
 | 页面 | 地址 | 说明 |

@@ -67,7 +67,8 @@ def format_contexts(contexts: Sequence[object]) -> str:
     """把检索片段编号排成提示词里的【资料片段】块。
 
     contexts 支持两种元素：带 `citation`/`text` 属性的对象（RetrievedChunk），
-    或形如 {"citation": ..., "text": ...} 的字典。
+    或形如 {"citation": ..., "text": ..., "label": "[网1]"} 的字典。
+    字典里给 `label` 时优先用它（这样联网来源能用 `[网N]` 与内部资料区分开）。
     """
     if not contexts:
         return "（无）"
@@ -77,10 +78,12 @@ def format_contexts(contexts: Sequence[object]) -> str:
         if isinstance(item, dict):
             citation = str(item.get("citation") or item.get("filename") or "未知来源")
             text = str(item.get("text") or "")
+            label = str(item.get("label") or f"[{index}]")
         else:
             citation = str(getattr(item, "citation", "未知来源"))
             text = str(getattr(item, "text", ""))
-        lines.append(f"[{index}] 来源：{citation}\n{text.strip()}")
+            label = f"[{index}]"
+        lines.append(f"{label} 来源：{citation}\n{text.strip()}")
     return "\n\n".join(lines)
 
 
@@ -148,8 +151,47 @@ def build_fallback_messages(
     return messages
 
 
-# ---------------------------------------------------------------- 工单抽取
+# ---------------------------------------------------------------- 实体对齐
 
+ALIGN_SYSTEM = """你是售后客服的意图理解助手。你的任务是判断客户问题问的是哪一款产品，
+并把问题改写成便于检索内部资料的查询。
+
+规则：
+1. 只使用对话中**确实出现过**的实体（型号、错误码），禁止编造型号；
+2. 如果客户问题缺主语，而对话里出现过型号，就把型号补进查询；
+3. 只输出一个 JSON 对象，不要解释文字、不要 markdown 围栏。"""
+
+ALIGN_PROMPT_TEMPLATE = Template("""请分析客户问题并输出 JSON：
+
+{
+  "intent": "售后咨询 | 故障报修 | 投诉 | 闲聊 | 无关",
+  "entities": ["问题指向的实体：型号或错误码；无法判断就空数组"],
+  "queries": ["2~3 条用于检索内部资料的查询式，第一条尽量补全型号"],
+  "confidence": "high | medium | low（能否确定客户问的是哪一款产品）",
+  "reason": "一句话说明判断依据"
+}
+
+客户问题：$question
+
+对话中已出现过的实体（只能从这些里选，不要编造）：
+$entities""")
+
+
+def build_align_messages(question: str, entity_names: Sequence[str]) -> list[dict]:
+    """实体对齐请求（一次调用同时产出意图、实体与查询变体）。"""
+    entities = "、".join(name for name in entity_names if name) or "（无）"
+    return [
+        {"role": "system", "content": ALIGN_SYSTEM},
+        {
+            "role": "user",
+            "content": ALIGN_PROMPT_TEMPLATE.substitute(
+                question=(question or "").strip() or "（空）", entities=entities
+            ),
+        },
+    ]
+
+
+# ---------------------------------------------------------------- 工单抽取
 TICKET_SYSTEM = """你是售后工单信息抽取助手。
 规则：
 1. 只抽取对话记录中**明确出现**的信息，禁止推断、补全或编造；

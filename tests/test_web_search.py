@@ -16,6 +16,7 @@ from app.rag.web_search import (
     build_query,
     filter_by_entity,
     is_enabled,
+    question_coverage,
     search,
     should_search,
 )
@@ -94,6 +95,31 @@ def test_should_search_only_when_internal_evidence_is_weak(settings):
     assert should_search(0.34, settings=settings) is True
     assert should_search(0.35, settings=settings) is False
     assert should_search(0.90, settings=settings) is False, "内部已命中就不该联网"
+
+
+def test_should_search_triggers_on_low_content_coverage(settings):
+    """重排分虚高（型号匹配）但主题没收录时，也要联网。"""
+    assert should_search(0.84, coverage=0.05, settings=settings) is True
+    assert should_search(0.84, coverage=0.29, settings=settings) is True
+    assert should_search(0.84, coverage=0.90, settings=settings) is False
+    assert should_search(0.84, settings=settings) is False, "不传覆盖率时只看重排分"
+
+
+def test_question_coverage_ignores_filler_and_entity():
+    texts = ["屏幕出现 E05 表示硒鼓未被识别，请重新安装硒鼓并确认芯片触点清洁。"]
+
+    # 型号与虚词都不算内容词；"硒鼓"在资料里
+    covered = question_coverage("L3250 的硒鼓怎么处理？", texts, entities=["L3250"])
+    uncovered = question_coverage("L3250 有没有以旧换新活动", texts, entities=["L3250"])
+
+    assert covered > 0.5
+    assert uncovered < 0.2, f"主题未收录时覆盖率应接近 0，实际 {uncovered}"
+
+
+def test_question_coverage_edge_cases():
+    assert question_coverage("", ["任意文本"]) == 1.0
+    assert question_coverage("怎么处理？", ["任意文本"]) == 1.0, "全是虚词时不做判断"
+    assert question_coverage("硒鼓回收", []) == 0.0
 
 
 def test_should_search_false_when_disabled(settings):

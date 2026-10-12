@@ -424,3 +424,55 @@ class BrokenVisionProvider(StubVisionProvider):
         kwargs.setdefault("name", "vision-local-broken")
         kwargs.setdefault("base_url", "http://127.0.0.1:11434/v1")
         super().__init__(error=error, **kwargs)
+
+
+class StubReranker:
+    """可控假重排器：关键字规则给分，便于对图逻辑做确定性断言。
+
+    规则是**查询感知**的：只有关键字同时出现在查询与文本里才给分
+    （真实交叉编码器的相关性本来就取决于两侧，忽略查询的打分器会给出误导性的高分）。
+
+    真实重排质量由 tests/test_reranker.py 用真模型验证；这里只需要"能稳定拉开差距"。
+    """
+
+    name = "stub-reranker"
+
+    def __init__(
+        self,
+        rules: Sequence[tuple[str, float]] | None = None,
+        *,
+        default: float = 0.02,
+        error: str | None = None,
+    ) -> None:
+        self.rules = list(
+            rules
+            if rules is not None
+            else [("E05", 0.95), ("保修", 0.88), ("网络", 0.90), ("回收", 0.91), ("卡纸", 0.93)]
+        )
+        self.default = default
+        self.error = error
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def score(self, query: str, texts: Sequence[str]) -> list[float]:
+        from app.llm.providers import ProviderError
+
+        self.calls.append((query, list(texts)))
+        if self.error:
+            raise ProviderError(self.error)
+
+        active = [(keyword, score) for keyword, score in self.rules if keyword in query]
+        scores: list[float] = []
+        for text in texts:
+            value = self.default
+            for keyword, score in active:
+                if keyword in text:
+                    value = max(value, score)
+            scores.append(value)
+        return scores
+
+    def health(self) -> tuple[bool, str]:
+        return True, "stub-reranker 就绪"
+
+
+def make_stub_reranker(**kwargs) -> StubReranker:
+    return StubReranker(**kwargs)

@@ -53,6 +53,21 @@ ENTITY_DEPENDENT_HINTS = (
 # 疑问语气：用于判断"这是一个需要实体的问题"还是陈述句
 QUESTION_HINTS = ("?", "？", "多少", "多久", "多长", "怎么", "如何", "为什么", "能不能", "是否", "哪个", "哪款", "吗")
 
+# 业务域词：出现这些词才说明客户在问本公司产品的问题。
+# 作用：像「预订国际航班机票价格」这种场外问题虽然含"价格"，但不该被当成"缺型号"而拒答，
+# 应该照常走检索 → 没证据 → 走"资料未收录"的兜底话术。
+DOMAIN_HINTS = (
+    "打印机", "打印", "复印", "扫描", "传真", "一体机", "设备", "机器", "机器",
+    "硒鼓", "墨盒", "碳粉", "粉盒", "鼓组件", "耗材", "纸张", "进纸", "卡纸",
+    "报错", "故障", "提示", "指示灯", "驱动", "固件", "安装", "连接", "无线", "网络",
+    "保修", "售后", "维修", "退换", "退货", "换货", "发票", "客服", "上门",
+    "型号", "序列号", "打印质量", "缺墨", "识别不了", "无法打印",
+)
+
+# 指示代词：出现这些词说明客户在指代上文出现过的产品（"这个多少钱"）。
+# 只在多字词上判断，避免"其他"里的"它"这类误命中。
+PRONOUN_HINTS = ("这个", "这台", "这款", "这机", "这货", "该机", "该款", "上面那台", "刚才那台", "我的这台")
+
 # 明确指代本机/本产品的词：出现这些词说明主语在句子内，不算缺主语
 SELF_REFERENCE_HINTS = ("这台", "这个机器", "本机", "我买的", "我的打印机", "这台机器")
 
@@ -197,6 +212,18 @@ def is_entity_dependent(question: str) -> bool:
     return any(hint in text for hint in ENTITY_DEPENDENT_HINTS)
 
 
+def is_in_domain(question: str) -> bool:
+    """问题是否在业务域内（场外问题不该被当成"缺型号"拒答）。"""
+    text = question or ""
+    return any(hint in text for hint in DOMAIN_HINTS)
+
+
+def refers_to_context(question: str) -> bool:
+    """问题是否用代词指代上文出现过的产品。"""
+    text = question or ""
+    return any(hint in text for hint in PRONOUN_HINTS)
+
+
 def looks_like_question(question: str) -> bool:
     text = question or ""
     return any(hint in text for hint in QUESTION_HINTS)
@@ -244,20 +271,23 @@ def judge_before_recall(
     *,
     context_entities: Sequence[EntityHint] = (),
     extra_options: Sequence[str] = (),
+    extra_inline: Sequence[str] = (),
     settings: Settings | None = None,
 ) -> PreJudgement:
     """检索前粗判：只判断"问得清不清楚"。
 
     规则（确定性，0ms）：
     1. 问题自带型号/错误码 → high（主语明确）；
-    2. 问题需要实体（保修期/价格/耗材型号…）但没有实体：
+    2. 问题需要实体（保修期/价格/耗材型号…）**且在业务域内**但没有实体：
        - 上下文里只有一个候选实体 → high（对齐到它，并把实体写进检索查询）；
        - 上下文里有多个候选 → medium（反问澄清）；
        - 上下文里没有候选 → low（拒答，请补充型号）；
-    3. 其余问题 → high（交给检索与重排判定）。
+    3. 其余问题 → high（交给检索与重排判定）。场外问题（如"机票价格"）走这一支，
+       最终由第二段证据不足走"资料未收录"兜底，而不是被当成缺型号。
     """
     settings = settings or get_settings()
-    inline = [name for name, _ in extract_entities(question)]
+    inline = list(extra_inline) + [name for name, _ in extract_entities(question)]
+    inline = list(dict.fromkeys(name for name in inline if name))
     pool = [item for item in context_entities if item.name]
 
     if inline:
@@ -269,10 +299,19 @@ def judge_before_recall(
             rewritten_query=question,
         )
 
-    if not is_entity_dependent(question):
+    if not (is_entity_dependent(question) or refers_to_context(question)):
         return PreJudgement(
             level=LEVEL_HIGH,
             reason="问题不依赖具体型号，直接检索",
+            rewritten_query=question,
+        )
+
+    # 场外问题（如"机票价格"）虽然含"价格"，但不该被当成"缺型号"：
+    # 照常走检索，没证据时走"资料未收录"兜底。
+    if not is_in_domain(question) and not refers_to_context(question):
+        return PreJudgement(
+            level=LEVEL_HIGH,
+            reason="问题不在业务域内，交给检索判定（大概率走兜底）",
             rewritten_query=question,
         )
 
@@ -350,6 +389,7 @@ def judge_after_recall(
 
 
 __all__ = [
+    "DOMAIN_HINTS",
     "ENTITY_DEPENDENT_HINTS",
     "EntityHint",
     "FinalJudgement",
@@ -363,6 +403,7 @@ __all__ = [
     "extract_entities",
     "has_inline_entity",
     "is_entity_dependent",
+    "is_in_domain",
     "judge_after_recall",
     "judge_before_recall",
     "looks_like_question",

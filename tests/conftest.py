@@ -57,8 +57,21 @@ def settings(work_dir: Path) -> Settings:
 
 @pytest.fixture()
 def small_chunk_settings(settings: Settings) -> Settings:
-    """小块配置：让短文档也能产生多个分块，便于验证分块与覆盖逻辑。"""
-    return settings.model_copy(update={"chunk_size": 60, "chunk_overlap": 10})
+    """小块配置 + 打开联网通道开关（测试都注入假 web_search，不会真的联网）。
+
+    为什么要给 MCP 配上假地址/假密钥：`should_search()` 会先检查通道是否可用，
+    没配就永远不会触发联网，联网相关的分支也就测不到。
+    """
+    return settings.model_copy(
+        update={
+            "chunk_size": 60,
+            "chunk_overlap": 10,
+            "mcp_enabled": True,
+            "mcp_base_url": "https://example.com/mcp",
+            # 必须是短占位符：仓库有密钥扫描测试，`sk-` 后超过 16 位会被判为疑似真实密钥
+            "mcp_api_key": "sk-fake-test",
+        }
+    )
 
 
 @pytest.fixture()
@@ -90,6 +103,11 @@ def api_env(work_dir: Path, monkeypatch):
     monkeypatch.setenv("WARMUP_ON_START", "false")
     monkeypatch.setenv("FALLBACK_LLM_PROVIDER", "none")
     monkeypatch.setenv("HISTORY_TURNS", "4")
+    # v2.1：接口测试保持离线与快速——不加载 2.1GB 重排模型、不联网
+    monkeypatch.setenv("RERANK_MODEL_PATH", "")
+    monkeypatch.setenv("MCP_ENABLED", "false")
+    monkeypatch.setenv("MCP_BASE_URL", "")
+    monkeypatch.setenv("MCP_API_KEY", "")
 
     get_settings.cache_clear()
     reset_caches()
@@ -116,16 +134,22 @@ def events() -> list[dict]:
 
 @pytest.fixture()
 def make_deps(conn, small_chunk_settings: Settings, events: list[dict]):
-    """构造 GraphDeps 的工厂：所有外部依赖都可替换。"""
+    """构造 GraphDeps 的工厂：所有外部依赖都可替换。
+
+    默认注入 `StubReranker`（可控假重排器）——否则候选只能拿排名分，
+    无法体现「重排后拉开差距再由动态 TopK 取舍」的行为。
+    """
     from app.deps import GraphDeps
     from app.store import ConversationStore
-    from fakes import FakeChatChain
+    from fakes import FakeChatChain, StubReranker
 
     def factory(
         *,
         chat_chain=None,
         embedder=None,
         vision_provider=None,
+        reranker="default",
+        web_search=None,
         settings: Settings | None = None,
     ) -> GraphDeps:
         return GraphDeps(
@@ -135,6 +159,8 @@ def make_deps(conn, small_chunk_settings: Settings, events: list[dict]):
             chat_chain=chat_chain or FakeChatChain(),
             embedder=embedder,
             vision_provider=vision_provider,
+            reranker=StubReranker() if reranker == "default" else reranker,
+            web_search=web_search,
             emit=events.append,
         )
 

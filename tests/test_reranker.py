@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from app.config import Settings, get_settings
+from app.config import Settings
 from app.rag.reranker import (
     CrossEncoderReranker,
     LexicalFallbackReranker,
@@ -87,16 +89,28 @@ def test_get_reranker_without_path_uses_fallback():
 
 # ------------------------------------------------------------------ 真实模型
 
+def _env_reranker_path() -> str:
+    """直接从 `.env` 读路径：不依赖环境变量与 get_settings 缓存，避免测试顺序影响结果。"""
+    env_file = Path(__file__).resolve().parent.parent / ".env"
+    if not env_file.exists():
+        return ""
+    for raw in env_file.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if line.startswith("RERANK_MODEL_PATH="):
+            return line.split("=", 1)[1].strip()
+    return ""
+
+
 @pytest.fixture(scope="session")
 def real_reranker():
-    settings = get_settings()
-    if not settings.rerank_model_path:
-        pytest.skip("未配置 RERANK_MODEL_PATH")
+    model_path = _env_reranker_path()
+    if not model_path:
+        pytest.skip("未在 .env 配置 RERANK_MODEL_PATH")
     reranker = CrossEncoderReranker(
-        settings.rerank_model_path,
-        device=settings.rerank_device,
-        batch_size=settings.rerank_batch_size,
-        max_length=settings.rerank_max_length,
+        model_path,
+        device="cpu",
+        batch_size=8,
+        max_length=512,
     )
     healthy, detail = reranker.health()
     if not healthy:

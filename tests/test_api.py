@@ -11,7 +11,14 @@ from app import db as dbmod
 from app import deps as deps_module
 from app.main import create_app
 from app.store import ConversationStore
-from fakes import FakeChatChain, HashEmbedder, StubVisionProvider, load_corpus, write_png
+from fakes import (
+    FakeChatChain,
+    HashEmbedder,
+    StubReranker,
+    StubVisionProvider,
+    load_corpus,
+    write_png,
+)
 
 E05_TEXT = (
     "屏幕出现 E05 表示硒鼓未被识别，请重新安装硒鼓并确认芯片触点清洁；"
@@ -52,10 +59,12 @@ def event_data(events: list[tuple[str, dict]], name: str) -> dict:
 def api_client(api_env, monkeypatch):
     """注入假模型依赖的测试客户端。"""
     from app.api import health as health_module
+    from app.rag import reranker as reranker_module
 
     chat_chain = FakeChatChain(text="请先检查硒鼓芯片触点 [1]，若仍报错请联系售后。")
     embedder = HashEmbedder(dim=64)
     vision = StubVisionProvider()
+    reranker = StubReranker()
 
     # build_deps 走 app.deps 里的名字
     monkeypatch.setattr(deps_module, "get_chat_chain", lambda settings=None: chat_chain)
@@ -63,6 +72,8 @@ def api_client(api_env, monkeypatch):
     monkeypatch.setattr(
         deps_module, "get_vision_providers", lambda settings=None: [vision]
     )
+    # build_deps 内部是 `from app.rag.reranker import get_reranker`，所以要打在源模块上
+    monkeypatch.setattr(reranker_module, "get_reranker", lambda settings=None: reranker)
     # health.py 用的是导入时绑定的名字，需要单独替换
     monkeypatch.setattr(health_module, "get_chat_chain", lambda settings=None: chat_chain)
     monkeypatch.setattr(
@@ -158,23 +169,32 @@ def test_chat_hit_path_streams_events_and_persists(api_client, seeded):
     names = event_names(events)
 
     assert names[0] == "meta"
-    assert "retrieval" in names and "token" in names and "done" in names
-    assert names.index("meta") < names.index("retrieval") < names.index("done")
+    assert {"intent", "rerank", "confidence", "token", "done"} <= set(names)
+    assert names.index("meta") < names.index("rerank") < names.index("done")
 
     meta = event_data(events, "meta")
     assert meta["conversation_id"].startswith("conv-")
     assert meta["title"] == "我的打印机报错E05，硒鼓怎么更换"[:24]
 
-    retrieval = event_data(events, "retrieval")
-    assert retrieval["hit"] is True
-    assert retrieval["chunks"][0]["citation"].startswith("打印机产品手册.md")
+    intent = event_data(events, "intent")
+    assert intent["level"] == "high"
+    assert "E05" in intent["entities"]
+
+    rerank = event_data(events, "rerank")
+    assert rerank["top1"] >= 0.5
+    assert rerank["kept"] >= 1
+    assert rerank["sources"]["internal"] >= 1
+
+    confidence = event_data(events, "confidence")
+    assert confidence["level"] == "high"
 
     done = event_data(events, "done")
     assert done["answer"] == chain.text
     assert done["citations"] == ["打印机产品手册.md · 第 12 页 · 报错处理"]
     assert done["ticket_draft"]["error_info"] == "E05"
     assert done["trace"]["provider"] == "fake"
-    assert done["trace"]["hit"] is True
+    assert done["trace"]["confidence"] == "high"
+    assert done["trace"]["rerank_mode"] in {"rerank", "none", "fallback"}
 
     streamed = "".join(
         data["text"] for name, data in events if name == "token"
@@ -186,7 +206,7 @@ def test_chat_hit_path_streams_events_and_persists(api_client, seeded):
     messages = client.get(f"/api/conversations/{conv_id}/messages").json()["items"]
     assert [item["role"] for item in messages] == ["user", "assistant"]
     assert messages[1]["citations"] == done["citations"]
-    assert messages[1]["trace"]["hit"] is True
+    assert messages[1]["trace"]["confidence"] == "high"
     conversation = client.get(f"/api/conversations/{conv_id}").json()
     assert conversation["ticket_draft"]["error_info"] == "E05"
 
@@ -197,8 +217,9 @@ def test_chat_fallback_path_for_unrelated_question(api_client, seeded):
     response = client.post("/api/chat", data={"text": "预订国际航班机票价格"})
     events = parse_sse(response.text)
 
-    retrieval = event_data(events, "retrieval")
-    assert retrieval["hit"] is False
+    rerank = event_data(events, "rerank")
+    assert rerank["kept"] == 0, "没有相关片段"
+    assert event_data(events, "confidence")["level"] == "low"
 
     done = event_data(events, "done")
     assert done["trace"]["fallback_used"] is True

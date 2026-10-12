@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     mcp_tool_name: str = ""  # 留空则自动挑选名字里带 search 的工具
     # 内部重排 top1 低于该值才联网（内部优先，不足才联网）
     mcp_trigger_top1: float = 0.35
+    # 问题内容词在候选里的覆盖率低于该值也联网。
+    # 为什么需要第二个信号：实测重排模型只要看到型号就给高分（0.74~0.84），
+    # 光看重排分则"资料里根本没这个主题"也判成够用，联网永远不会触发。
+    mcp_trigger_coverage: float = 0.34
     # 联网结果必须包含问题实体，否则丢弃（防"同名错误码含义不同"污染答案）
     mcp_require_entity_match: bool = True
 
@@ -95,6 +99,8 @@ class Settings(BaseSettings):
     rerank_relative_floor: float = 0.35
     rerank_cliff_ratio: float = 0.5
     rerank_top_k_max: int = 6
+    # 进入重排的候选数量（每个查询变体各取这么多，重排后由动态 TopK 收敛）
+    rerank_candidates: int = 24
 
     # --- 三档置信判定（高置信检索 / 中置信反问 / 低置信拒答）---
     confidence_high: float = 0.50

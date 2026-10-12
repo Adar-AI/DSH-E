@@ -130,7 +130,9 @@ Test-Step '文字对话：SSE 事件序列完整' {
     $script:textEvents = Invoke-Chat @{ text = '我的打印机报错E05，硒鼓刚换过，怎么处理？' }
     $names = $script:textEvents | ForEach-Object { $_.Name }
     Assert-True ($names -contains 'meta') "缺少 meta 事件（实际：$($names -join ',')）"
-    Assert-True ($names -contains 'retrieval') '缺少 retrieval 事件'
+    Assert-True ($names -contains 'intent') '缺少 intent 事件（v2.1 意图确认）'
+    Assert-True ($names -contains 'rerank') '缺少 rerank 事件（v2.1 精排）'
+    Assert-True ($names -contains 'confidence') '缺少 confidence 事件（v2.1 三档置信）'
     Assert-True ($names -contains 'token') '缺少 token 流式事件'
     Assert-True ($names -contains 'done') '缺少 done 事件'
 
@@ -143,11 +145,26 @@ Test-Step '文字对话：SSE 事件序列完整' {
     Assert-True ($streamed -eq $done.Data.answer) 'token 拼接结果与最终回答不一致'
 }
 
+Test-Step '文字对话：意图识别与精排状态可见' {
+    $intent = Get-SseEvent $script:textEvents 'intent'
+    $rerank = Get-SseEvent $script:textEvents 'rerank'
+    $confidence = Get-SseEvent $script:textEvents 'confidence'
+
+    Assert-True ($intent.Data.level -eq 'high') "意图置信档位应为 high：$($intent.Data.level)"
+    Assert-True ($intent.Data.entities -contains 'E05') "实体抽取缺少 E05：$($intent.Data.entities -join ',')"
+    Assert-True ($intent.Data.queries.Count -ge 1) '没有生成检索查询式'
+    Assert-True ($rerank.Data.kept -ge 1) "支撑片段为空（top1 $($rerank.Data.top1)）"
+    Assert-True ($rerank.Data.top1 -ge 0.1) "重排分数过低：$($rerank.Data.top1)"
+    Assert-True ($confidence.Data.level -eq 'high') "终判应为 high：$($confidence.Data.level)"
+    Write-Host ("    意图={0} 实体={1} 查询={2} 条" -f `
+        $intent.Data.level, ($intent.Data.entities -join '/'), $intent.Data.queries.Count) -ForegroundColor DarkGray
+    Write-Host ("    精排模式={0} 候选={1} 保留={2} 截断={3} top1={4}" -f `
+        $rerank.Data.mode, $rerank.Data.candidates, $rerank.Data.kept, $rerank.Data.cutoff, $rerank.Data.top1) -ForegroundColor DarkGray
+}
+
 Test-Step '文字对话：检索命中并给出依据' {
-    $retrieval = Get-SseEvent $script:textEvents 'retrieval'
-    Assert-True ($retrieval.Data.hit -eq $true) "未命中知识库（最高分 $($retrieval.Data.best_score)）"
-    Assert-True ($retrieval.Data.chunks.Count -ge 1) '没有返回支撑片段'
     $done = Get-SseEvent $script:textEvents 'done'
+    Assert-True ($done.Data.trace.confidence -eq 'high') "终判置信度异常：$($done.Data.trace.confidence)"
     Assert-True ($done.Data.citations.Count -ge 1) '回答没有引用来源'
     Assert-True ($done.Data.ticket_draft.error_info -match 'E05') "工单草稿没抓到报错码：$($done.Data.ticket_draft.error_info)"
 }
@@ -187,12 +204,38 @@ Test-Step '图片已落盘到 uploads 目录' {
 
 Test-Step '未命中知识库：走兜底话术且不编造' {
     $events = Invoke-Chat @{ text = '帮我订一张去上海的机票，顺便推荐酒店' }
-    $retrieval = Get-SseEvent $events 'retrieval'
+    $confidence = Get-SseEvent $events 'confidence'
     $done = Get-SseEvent $events 'done'
-    Assert-True ($retrieval.Data.hit -eq $false) "这个问题不该命中知识库（最高分 $($retrieval.Data.best_score)）"
+    Assert-True ($confidence.Data.level -eq 'low') "场外问题应判低置信：$($confidence.Data.level)"
+    Assert-True ($confidence.Data.kept -eq 0) "不应有支撑片段：$($confidence.Data.kept)"
     Assert-True ($done.Data.trace.fallback_used -eq $true) 'fallback_used 应为 true'
     Assert-True ($done.Data.citations.Count -eq 0) '兜底回答不应带引用'
     Assert-True ($done.Data.answer -match '未收录') "兜底话术缺少「未收录」表述：$($done.Data.answer)"
+}
+
+Test-Step '中置信反问：缺主语且上下文有多个型号时不猜' {
+    $first = Invoke-Chat @{ text = '我有一台 L3250 打印机，还有一台 M1136' }
+    $script:clarifyConversation = (Get-SseEvent $first 'meta').Data.conversation_id
+    $events = Invoke-Chat @{ text = '保修期是多少？'; conversation_id = $script:clarifyConversation }
+    $clarify = Get-SseEvent $events 'clarify'
+    $done = Get-SseEvent $events 'done'
+
+    Assert-True ($null -ne $clarify) '缺少 clarify 事件'
+    Assert-True ($clarify.Data.candidates.Count -ge 2) "澄清候选不足：$($clarify.Data.candidates -join ',')"
+    Assert-True ($done.Data.answer -match 'L3250') '反问话术里没有列出候选型号'
+    Assert-True ($done.Data.citations.Count -eq 0) '反问不应带引用（没有作答）'
+    Write-Host ("    反问候选={0}" -f ($clarify.Data.candidates -join '/')) -ForegroundColor DarkGray
+}
+
+Test-Step '低置信拒答：全新会话缺主语时要求补充型号' {
+    $events = Invoke-Chat @{ text = '保修期是多少？' }
+    $reject = Get-SseEvent $events 'reject'
+    $done = Get-SseEvent $events 'done'
+
+    Assert-True ($null -ne $reject) '缺少 reject 事件'
+    Assert-True ($done.Data.answer -match '缺少必要信息') "拒答话术异常：$($done.Data.answer)"
+    Assert-True ($done.Data.answer -match '型号') '拒答话术应说明需要型号'
+    Assert-True ($done.Data.citations.Count -eq 0) '拒答不应带引用'
 }
 
 # ---------------------------------------------------------------- 工单定稿

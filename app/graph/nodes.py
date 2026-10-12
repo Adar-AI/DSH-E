@@ -1,7 +1,23 @@
-"""对话图的节点实现。
+"""对话图的节点实现（v2.1 六节点）。
 
-节点都是「输入状态 → 输出局部状态」的纯函数式写法，依赖通过闭包注入（`GraphDeps`），
-因此可以脱离 LangGraph 直接单测：给定状态与假依赖，断言输出即可。
+节点与需求规格第 13.1 节的对应关系：
+
+| 需求节点 | 实现 |
+|---|---|
+| ① 意图确认与改写 | `intent_align` |
+| ② 并发召回（内部 + MCP 联网） | `recall_internal` + `fuse_rerank` 内的联网判定 |
+| ③ RRF 融合 | `fuse_rerank` |
+| ④ 重排 | `fuse_rerank` |
+| ⑤ 动态 TopK | `fuse_rerank`（`select_supporting`） |
+| ⑥ LLM 生成 | `generate_answer` / `fallback_answer` / `clarify` / `reject_low` |
+
+为什么 ②③④⑤ 合并在一个节点里：联网的触发条件依赖**内部候选的重排结果**
+（"内部 top1 < 阈值才联网"），拆成两个节点就必须把候选在状态里来回搬运；
+而图状态要能被 checkpointer 序列化，所以候选只能以 dict 形式传递。
+合并后逻辑更清晰，也少一次状态往返。
+
+所有节点都是「输入状态 → 输出局部状态」的纯函数式写法，依赖通过闭包注入（`GraphDeps`），
+可以脱离 LangGraph 直接单测。
 """
 
 from __future__ import annotations
@@ -18,7 +34,28 @@ from app.llm.prompts import (
 )
 from app.llm.providers import ProviderError
 from app.llm.vision import analyze_image
+from app.rag.confidence import (
+    LEVEL_HIGH,
+    LEVEL_LOW,
+    LEVEL_MEDIUM,
+    build_clarify_message,
+    build_reject_message,
+    collect_entity_pool,
+    extract_entities,
+    judge_after_recall,
+    judge_before_recall,
+)
+from app.rag.fusion import (
+    Candidate,
+    SOURCE_INTERNAL,
+    SOURCE_WEB,
+    apply_rerank_scores,
+    rrf_fuse,
+    select_supporting,
+    summarize_sources,
+)
 from app.rag.retriever import hybrid_retrieve
+from app.rag.rewrite import align_with_llm, build_query_variants, merge_alignment
 from app.tickets.draft import extract_from_text, merge_draft
 
 logger = logging.getLogger(__name__)
@@ -29,6 +66,23 @@ ANSWER_UNAVAILABLE = (
 )
 
 NodeFn = Callable[[GraphState], dict[str, Any]]
+
+
+def label_contexts(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """给支撑片段打引用标号：内部 `[1]`、联网 `[网1]`（两者分开编号）。"""
+    labelled: list[dict[str, Any]] = []
+    internal_index = 0
+    web_index = 0
+    for item in candidates:
+        payload = dict(item)
+        if payload.get("source") == SOURCE_WEB:
+            web_index += 1
+            payload["label"] = f"[网{web_index}]"
+        else:
+            internal_index += 1
+            payload["label"] = f"[{internal_index}]"
+        labelled.append(payload)
+    return labelled
 
 
 def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
@@ -62,16 +116,27 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
             "vision_ok": False,
             "vision_error": "",
             "vision_detail": {},
-            "query": "",
-            "retrieved": [],
-            "hit": False,
-            "best_score": 0.0,
-            "retrieval_mode": "",
-            "retrieval_reason": "",
+            "vision_provider": "",
+            "vision_local": False,
+            "queries": [],
+            "entities": [],
+            "internal_channels": {},
+            "candidates": [],
+            "kept": [],
+            "selection": {},
+            "rerank_top1": 0.0,
+            "recall_sources": {},
+            "web_used": False,
+            "web_detail": {},
+            "confidence": "",
+            "confidence_reason": "",
+            "clarify_question": "",
+            "reject_message": "",
             "answer": "",
             "provider": "",
             "answer_error": "",
             "citations": [],
+            "web_citations": [],
             "fallback_used": False,
             "error": "",
         }
@@ -122,57 +187,346 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
             "vision_local": result.local,
         }
 
-    def rewrite_query(state: GraphState) -> dict[str, Any]:
-        """把文字与图片描述合并成检索查询（确定性改写，不额外调用模型）。"""
-        text = str(state.get("text") or "").strip()
-        summary = str(state.get("vision_summary") or "").strip()
+    # ------------------------------------------------- ① 意图确认与查询改写
 
-        parts: list[str] = [text] if text else []
-        if summary:
-            keys = {"错误码或提示", "产品型号", "概述", "可见异常", "其他文字", "图片类型"}
-            extra = [
-                line.strip()
-                for line in summary.splitlines()
-                if line.split("：")[0].strip() in keys
-            ]
-            parts.extend(extra or [summary])
-        return {"query": "\n".join(part for part in parts if part).strip()}
+    def intent_align(state: GraphState) -> dict[str, Any]:
+        settings = deps.settings
+        question = str(state.get("text") or "").strip()
+        conversation_id = str(state.get("conversation_id") or "")
 
-    # ---------------------------------------------------------------- 检索
-
-    def retrieve(state: GraphState) -> dict[str, Any]:
-        deps.emitter({"type": "stage", "stage": "retrieval", "message": "正在检索内部资料…"})
-        outcome = hybrid_retrieve(
-            deps.conn,
-            str(state.get("query") or ""),
-            embedder=deps.embedder,
-            settings=deps.settings,
+        history_texts = [str(item.get("content") or "") for item in (state.get("history") or [])]
+        draft = deps.store.get_draft(conversation_id) if conversation_id else {}
+        vision_detail = state.get("vision_detail") or {}
+        pool = collect_entity_pool(
+            history_texts=history_texts,
+            draft=draft,
+            vision_detail=vision_detail,
         )
-        chunks = [chunk.as_dict() for chunk in outcome.chunks]
+
+        # 图片里识别出的型号/错误码等同于"问题里已经说了"，直接当作已知实体
+        vision_entities = [
+            str(vision_detail.get("product_model") or ""),
+            *(str(code) for code in (vision_detail.get("error_codes") or [])),
+            *(name for name, _ in extract_entities(str(state.get("vision_summary") or ""))),
+        ]
+        vision_names = [name for name in dict.fromkeys(vision_entities) if name]
+
+        judgement = judge_before_recall(
+            question,
+            context_entities=pool,
+            extra_inline=vision_names,
+            settings=settings,
+        )
+        confidence_hint = ""
+
+        # 边界情形（缺主语但可能有救）才调 LLM，默认关闭
+        if judgement.needs_llm_align and settings.llm_align_enabled:
+            alignment = align_with_llm(
+                question, context_entities=pool, chat_chain=deps.chat_chain, settings=settings
+            )
+            if alignment is not None:
+                confidence_hint = alignment.confidence
+                if alignment.confidence == LEVEL_HIGH and alignment.entities:
+                    judgement.level = LEVEL_HIGH
+                    judgement.reason += f"；LLM 判定可确定实体：{'、'.join(alignment.entities)}"
+                    judgement.context_entities = alignment.entities
+                elif alignment.confidence == LEVEL_LOW:
+                    judgement.level = LEVEL_LOW
+                    judgement.reason += "；LLM 判定无法确定实体"
+                    judgement.reject_message = judgement.reject_message or build_reject_message(question)
+
+        inline = [name for name, _ in extract_entities(question)]
+        error_codes = [name for name, kind in extract_entities(question) if kind == "error_code"]
+        for name, kind in extract_entities(str(state.get("vision_summary") or "")):
+            if kind == "error_code" and name not in error_codes:
+                error_codes.append(name)
+        error_codes.extend(
+            str(code) for code in (vision_detail.get("error_codes") or []) if str(code) not in error_codes
+        )
+
+        # 型号候选：上下文（图片/草稿/历史）+ 问题自带的 + 图片识别出的。
+        # 问题自带的型号也要算进去，否则"内部没收录、问题里带型号"时联网会被自己跳过。
+        model_entities = list(
+            dict.fromkeys(
+                [
+                    *(item.name for item in pool if item.kind == "product_model"),
+                    *(name for name, kind in extract_entities(question) if kind == "product_model"),
+                    *(name for name in vision_names if name not in error_codes),
+                ]
+            )
+        )
+        model_entities = [name for name in model_entities if name not in error_codes]
+        # 检索式里带上所有已知实体（问题里的 + 图片里的 + 上下文对齐的），
+        # 否则"图片显示 E05、文字只说打印不出来"这类问题检索不到正确片段
+        rewrite_entities = [
+            name
+            for name in dict.fromkeys([*inline, *vision_names, *judgement.context_entities, *model_entities])
+            if name and name not in error_codes
+        ]
+        rule_queries = build_query_variants(
+            judgement.rewritten_query or question,
+            entities=rewrite_entities,
+            error_codes=error_codes,
+            max_variants=3,
+        )
+
+        queries = rule_queries
+        if judgement.needs_llm_align and settings.llm_align_enabled:
+            alignment = align_with_llm(
+                question, context_entities=pool, chat_chain=deps.chat_chain, settings=settings
+            )
+            queries, llm_entities, hint = merge_alignment(
+                rule_queries=rule_queries,
+                rule_entities=rewrite_entities,
+                alignment=alignment,
+                max_variants=3,
+            )
+            confidence_hint = confidence_hint or hint
+            model_entities = list(dict.fromkeys([*model_entities, *llm_entities]))
+
         deps.emitter(
             {
-                "type": "retrieval",
-                "hit": outcome.hit,
-                "best_score": outcome.best_score,
-                "mode": outcome.mode,
-                "reason": outcome.reason,
-                "keyword_candidates": outcome.keyword_candidates,
-                "vector_candidates": outcome.vector_candidates,
-                "chunks": chunks,
+                "type": "intent",
+                "level": judgement.level,
+                "reason": judgement.reason,
+                "entities": [*inline, *vision_names, *judgement.context_entities],
+                "queries": queries,
+                "needs_llm_align": judgement.needs_llm_align,
+                "confidence_hint": confidence_hint,
+            }
+        )
+
+        return {
+            "queries": queries,
+            "query": queries[0] if queries else question,
+            "entities": [*inline, *vision_names, *judgement.context_entities],
+            "model_entities": model_entities,
+            "pre_level": judgement.level,
+            "pre_reason": judgement.reason,
+            "confidence": judgement.level,
+            "confidence_reason": judgement.reason,
+            "clarify_question": judgement.clarify_question,
+            "reject_message": judgement.reject_message,
+            "clarify_candidates": judgement.context_entities,
+        }
+
+    # ------------------------------------------------------- ② 内部多路召回
+
+    def recall_internal(state: GraphState) -> dict[str, Any]:
+        settings = deps.settings
+        queries = [query for query in (state.get("queries") or []) if query] or [
+            str(state.get("text") or "")
+        ]
+        channels: dict[str, list[dict[str, Any]]] = {}
+        best = 0.0
+        total = 0
+
+        deps.emitter({"type": "stage", "stage": "recall", "message": "正在检索内部资料…"})
+        for index, query in enumerate(queries, start=1):
+            outcome = hybrid_retrieve(
+                deps.conn,
+                query,
+                embedder=deps.embedder,
+                settings=settings,
+                top_k=settings.rerank_candidates,
+                candidates=settings.rerank_candidates,
+                min_score=0.0,
+                apply_support_filter=False,
+            )
+            name = f"internal:q{index}"
+            channels[name] = [
+                Candidate.from_retrieved(chunk.as_dict(), channel=name).as_dict()
+                for chunk in outcome.chunks
+            ]
+            total += len(channels[name])
+            best = max(best, outcome.best_score)
+
+        return {
+            "internal_channels": channels,
+            "internal_best": best,
+            "recall_sources": {SOURCE_INTERNAL: total},
+        }
+
+    # ------------------------------------------- ③④⑤ 融合 + 重排 + 动态 TopK
+
+    def fuse_rerank(state: GraphState) -> dict[str, Any]:
+        settings = deps.settings
+        question = str(state.get("text") or "").strip()
+        # 重排用的查询 = 原始问题 + 已知实体。
+        # 为什么必须带上实体：客户可能只说"打印不出来了"，型号/错误码是图片或上下文给的；
+        # 拿原始问题去精排，会把最相关的片段也打低分（实测过这个坑）。
+        entity_hint = [str(item) for item in (state.get("entities") or []) if item]
+        rerank_query = " ".join([question, *entity_hint]).strip() or question
+
+        channels = {
+            name: [Candidate.from_dict(item) for item in items]
+            for name, items in (state.get("internal_channels") or {}).items()
+        }
+
+        fused = rrf_fuse(channels)
+        reranker = deps.reranker
+        rerank_mode = "rerank" if reranker is not None else "none"
+
+        if fused and reranker is not None:
+            try:
+                scores = reranker.score(rerank_query, [item.text for item in fused])
+                fused = apply_rerank_scores(fused, scores)
+            except Exception as exc:  # noqa: BLE001 - 重排失败退化为融合分
+                logger.warning("重排失败，改用融合分：%s", exc)
+                rerank_mode = "fallback"
+
+        internal_top1 = fused[0].score if fused else 0.0
+
+        # 联网判定：内部证据不足才联网（内部优先）
+        web_detail: dict[str, Any] = {}
+        web_used = False
+        model_entities = [str(item) for item in (state.get("model_entities") or [])]
+        coverage = 1.0
+        if deps.web_search is not None:
+            from app.rag.web_search import build_query, question_coverage, should_search
+
+            coverage = question_coverage(
+                question,
+                [item.text for item in fused],
+                entities=[*model_entities, *(state.get("entities") or [])],
+            )
+            if should_search(internal_top1, coverage=coverage, settings=settings):
+                deps.emitter({"type": "stage", "stage": "web", "message": "内部资料不足，正在联网检索…"})
+                outcome = deps.web_search(
+                    build_query(question, model_entities),
+                    entities=model_entities,
+                    settings=settings,
+                )
+                web_detail = outcome.as_dict()
+                candidates = [result.as_candidate() for result in outcome.results]
+                if candidates:
+                    web_used = True
+                    web_channel = rrf_fuse({"web": candidates})
+                    if reranker is not None:
+                        try:
+                            web_scores = reranker.score(
+                                rerank_query, [item.text for item in web_channel]
+                            )
+                            web_channel = apply_rerank_scores(web_channel, web_scores)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("联网候选重排失败，保留融合分：%s", exc)
+                    merged = {item.key: item for item in fused}
+                    for item in web_channel:
+                        merged.setdefault(item.key, item)
+                    fused = sorted(merged.values(), key=lambda entry: (-entry.score, entry.key))
+
+        selection = select_supporting(
+            fused,
+            min_score=settings.rerank_min_score,
+            relative_floor=settings.rerank_relative_floor,
+            cliff_ratio=settings.rerank_cliff_ratio,
+            top_k_max=settings.rerank_top_k_max,
+        )
+
+        sources = summarize_sources(fused)
+        deps.emitter(
+            {
+                "type": "rerank",
+                "mode": rerank_mode,
+                "candidates": len(fused),
+                "top1": round(selection.top1, 4),
+                "kept": len(selection.kept),
+                "cutoff": selection.cutoff,
+                "reason": selection.reason,
+                "sources": sources,
+                "coverage": round(coverage, 4),
+                "web": web_detail,
+            }
+        )
+
+        return {
+            "candidates": [item.as_dict() for item in fused],
+            "kept": [item.as_dict() for item in selection.kept],
+            "selection": selection.as_dict(),
+            "rerank_top1": selection.top1,
+            "rerank_mode": rerank_mode,
+            "rerank_query": rerank_query,
+            "recall_sources": sources,
+            "web_used": web_used,
+            "web_detail": web_detail,
+        }
+
+    # ------------------------------------------------------- ⑤′ 置信终判
+
+    def post_judge(state: GraphState) -> dict[str, Any]:
+        settings = deps.settings
+        question = str(state.get("text") or "").strip()
+        kept = state.get("kept") or []
+        top1 = float(state.get("rerank_top1") or 0.0)
+
+        pre = judge_before_recall(
+            question, context_entities=(), settings=settings
+        )
+        pre.context_entities = list(state.get("clarify_candidates") or [])
+
+        judgement = judge_after_recall(
+            question,
+            top1=top1,
+            kept=len(kept),
+            pre=pre,
+            extra_options=list(state.get("model_entities") or []),
+            settings=settings,
+        )
+        deps.emitter(
+            {
+                "type": "confidence",
+                "level": judgement.level,
+                "top1": round(judgement.top1, 4),
+                "kept": judgement.kept,
+                "reason": judgement.reason,
             }
         )
         return {
-            "retrieved": chunks,
-            "hit": outcome.hit,
-            "best_score": outcome.best_score,
-            "retrieval_mode": outcome.mode,
-            "retrieval_reason": outcome.reason,
+            "confidence": judgement.level,
+            "confidence_reason": judgement.reason,
+            "clarify_question": judgement.clarify_question or state.get("clarify_question") or "",
+            "reject_message": judgement.reject_message or state.get("reject_message") or "",
         }
+
+    # ------------------------------------------------------------ 澄清 / 拒答
+
+    def clarify(state: GraphState) -> dict[str, Any]:
+        """中置信：只反问，不给答案（话术是确定性模板）。"""
+        question = str(state.get("text") or "").strip()
+        candidates = list(state.get("clarify_candidates") or [])
+        options = list(state.get("model_entities") or [])
+        message = str(state.get("clarify_question") or "").strip() or build_clarify_message(
+            question, candidates, extra_options=options
+        )
+        deps.emitter(
+            {
+                "type": "clarify",
+                "question": message,
+                "candidates": candidates,
+                "reason": state.get("confidence_reason") or state.get("pre_reason") or "",
+            }
+        )
+        deps.emitter({"type": "token", "text": message})
+        return {"answer": message, "citations": [], "web_citations": [], "fallback_used": False}
+
+    def reject_low(state: GraphState) -> dict[str, Any]:
+        """低置信：拒答（说明缺什么、怎么补），与"资料未收录"的兜底话术区分开。"""
+        question = str(state.get("text") or "").strip()
+        message = str(state.get("reject_message") or "").strip() or build_reject_message(question)
+        deps.emitter(
+            {
+                "type": "reject",
+                "message": message,
+                "reason": state.get("confidence_reason") or state.get("pre_reason") or "",
+            }
+        )
+        deps.emitter({"type": "token", "text": message})
+        return {"answer": message, "citations": [], "web_citations": [], "fallback_used": False}
 
     # ---------------------------------------------------------------- 回答
 
     def _stream_answer(messages: list[dict]) -> dict[str, Any]:
-        """流式生成并推送 token 事件；流式起不来就整体失败，由调用方兜底。"""
+        """流式生成并推送 token 事件。"""
         try:
             provider_name, iterator = deps.chat_chain.stream(
                 messages, max_tokens=deps.settings.chat_max_tokens
@@ -198,7 +552,6 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
         return {"answer": "".join(pieces).strip(), "provider": provider_name, "answer_error": ""}
 
     def _vision_prefix(state: GraphState) -> str:
-        """图片识别失败时的提示语：必须在回答正文之前推送，页面顺序才正确。"""
         error = str(state.get("vision_error") or "").strip()
         if not error:
             return ""
@@ -208,14 +561,15 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
 
     def generate_answer(state: GraphState) -> dict[str, Any]:
         prefix = _vision_prefix(state)
-        chunks = state.get("retrieved") or []
+        contexts = label_contexts(list(state.get("kept") or []))
         messages = build_answer_messages(
             str(state.get("text") or ""),
-            chunks,
+            contexts,
             vision_summary=str(state.get("vision_summary") or ""),
             history=state.get("history") or [],
         )
         result = _stream_answer(messages)
+
         answer = str(result.get("answer") or "")
         if not answer:
             answer = ANSWER_UNAVAILABLE.format(
@@ -223,23 +577,35 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
             )
             deps.emitter({"type": "token", "text": answer})
 
-        citations = [str(chunk.get("citation") or "") for chunk in chunks if chunk.get("citation")]
+        if any(item.get("source") == SOURCE_WEB for item in contexts):
+            note = "\n\n（以上部分依据来自互联网公开资料，仅供参考；如需准确结论请以本公司资料或人工客服为准。）"
+            deps.emitter({"type": "token", "text": note})
+            answer += note
+
+        # 内部引用进 messages/工单；联网来源只进 trace（用户确认：联网不入工单）
+        citations = [
+            str(item.get("citation") or "")
+            for item in contexts
+            if item.get("source") != SOURCE_WEB and item.get("citation")
+        ]
+        web_citations = [
+            f"[网{i}] {item.get('citation')}（{item.get('url')}）"
+            for i, item in enumerate(
+                [entry for entry in contexts if entry.get("source") == SOURCE_WEB], start=1
+            )
+        ]
+
         return {
             "answer": prefix + answer,
             "provider": str(result.get("provider") or ""),
             "answer_error": str(result.get("answer_error") or ""),
             "citations": citations,
+            "web_citations": web_citations,
             "fallback_used": False,
         }
 
     def fallback_answer(state: GraphState) -> dict[str, Any]:
-        """未命中知识库：走兜底话术。
-
-        默认**不调用模型**，直接用模板逐字输出：兜底路径本身就是「不许编」的场景，
-        交给模型润色反而有改写成模糊说法、甚至编造无关建议的风险；同时这条路
-        在模型全挂时也必须可用，确定性输出天然满足。需要润色时把
-        `FALLBACK_USE_MODEL` 打开即可。
-        """
+        """未命中知识库：走兜底话术（默认不调用模型，逐字可控）。"""
         prefix = _vision_prefix(state)
         question = str(state.get("text") or "").strip() or "（客户只上传了图片）"
         vision_summary = str(state.get("vision_summary") or "").strip()
@@ -271,6 +637,7 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
             "provider": provider,
             "answer_error": answer_error,
             "citations": [],
+            "web_citations": [],
             "fallback_used": True,
         }
 
@@ -295,8 +662,12 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
         "prepare": prepare,
         "reject": reject,
         "vision_understand": vision_understand,
-        "rewrite_query": rewrite_query,
-        "hybrid_retrieve": retrieve,
+        "intent_align": intent_align,
+        "recall_internal": recall_internal,
+        "fuse_rerank": fuse_rerank,
+        "post_judge": post_judge,
+        "clarify": clarify,
+        "reject_low": reject_low,
         "generate_answer": generate_answer,
         "fallback_answer": fallback_answer,
         "update_draft": update_draft,
@@ -308,11 +679,33 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
 def route_after_prepare(state: GraphState) -> str:
     if state.get("error"):
         return "reject"
-    return "vision_understand" if state.get("image_path") else "rewrite_query"
+    return "vision_understand" if state.get("image_path") else "intent_align"
 
 
-def route_after_retrieve(state: GraphState) -> str:
-    return "generate_answer" if state.get("hit") else "fallback_answer"
+def route_after_intent(state: GraphState) -> str:
+    """第一段判定：问得不清楚就别检索了。"""
+    level = str(state.get("pre_level") or LEVEL_HIGH)
+    if level == LEVEL_LOW:
+        return "reject_low"
+    if level == LEVEL_MEDIUM:
+        return "clarify"
+    return "recall_internal"
 
 
-__all__ = ["build_nodes", "route_after_prepare", "route_after_retrieve"]
+def route_after_judge(state: GraphState) -> str:
+    """第二段判定：资料够不够答。"""
+    level = str(state.get("confidence") or LEVEL_HIGH)
+    if level == LEVEL_LOW:
+        return "fallback_answer"
+    if level == LEVEL_MEDIUM:
+        return "clarify"
+    return "generate_answer"
+
+
+__all__ = [
+    "build_nodes",
+    "label_contexts",
+    "route_after_intent",
+    "route_after_judge",
+    "route_after_prepare",
+]

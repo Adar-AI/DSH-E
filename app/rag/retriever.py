@@ -211,8 +211,13 @@ def hybrid_retrieve(
     top_k: int | None = None,
     candidates: int | None = None,
     min_score: float | None = None,
+    apply_support_filter: bool = True,
 ) -> RetrievalOutcome:
-    """混合检索主入口。embedder 为 None 或不可用时自动退化为纯关键词。"""
+    """混合检索主入口。embedder 为 None 或不可用时自动退化为纯关键词。
+
+    `apply_support_filter=False` 时不丢弃低分候选，返回完整的打分候选列表 ——
+    v2.1 的精排流程需要看到全部候选，由重排 + 动态 TopK 决定取舍。
+    """
     settings = settings or get_settings()
     top_k = int(top_k or settings.retrieve_top_k)
     candidates = int(candidates or settings.retrieve_candidates)
@@ -284,7 +289,7 @@ def hybrid_retrieve(
     best = scored[0].score if scored else 0.0
 
     # 只把「够格」的片段作为支撑集返回（见文件顶部 RELATIVE_FLOOR 的说明）
-    if scored:
+    if apply_support_filter and scored:
         floor = max(best * RELATIVE_FLOOR, ABSOLUTE_FLOOR)
         scored = [item for item in scored if item.score >= floor]
 

@@ -28,19 +28,40 @@ class GraphState(TypedDict, total=False):
     vision_provider: str
     vision_local: bool
 
-    # ---- 检索 ----
+    # ---- 意图确认与改写（第一段判定）----
     query: str
-    retrieved: list[dict[str, Any]]
-    hit: bool
-    best_score: float
-    retrieval_mode: str
-    retrieval_reason: str
+    queries: list[str]
+    entities: list[str]
+    model_entities: list[str]
+    pre_level: str
+    pre_reason: str
+    clarify_candidates: list[str]
+    clarify_question: str
+    reject_message: str
+
+    # ---- 召回与融合（第二段判定的输入）----
+    internal_channels: dict[str, list[dict[str, Any]]]
+    internal_best: float
+    candidates: list[dict[str, Any]]
+    kept: list[dict[str, Any]]
+    selection: dict[str, Any]
+    rerank_top1: float
+    rerank_mode: str
+    rerank_query: str
+    recall_sources: dict[str, int]
+    web_used: bool
+    web_detail: dict[str, Any]
+
+    # ---- 置信度（两段判定的结论）----
+    confidence: str
+    confidence_reason: str
 
     # ---- 回答 ----
     answer: str
     provider: str
     answer_error: str
     citations: list[str]
+    web_citations: list[str]
     fallback_used: bool
 
     # ---- 工单草稿 ----

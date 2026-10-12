@@ -230,14 +230,6 @@ def is_enabled(settings: Settings | None = None) -> bool:
     return bool(settings.mcp_enabled and settings.mcp_base_url and settings.mcp_api_key)
 
 
-def should_search(top1: float, *, settings: Settings | None = None) -> bool:
-    """内部资料证据是否不足到需要联网。"""
-    settings = settings or get_settings()
-    if not is_enabled(settings):
-        return False
-    return float(top1) < float(settings.mcp_trigger_top1)
-
-
 def build_query(
     question: str,
     entities: Sequence[str] = (),
@@ -317,6 +309,74 @@ def is_discriminating_entity(name: str) -> bool:
     if not text:
         return False
     return ERROR_CODE_RE.fullmatch(text) is None
+
+
+# 疑问/客套等虚词，先剔除再算覆盖率（否则"怎么/多少/有没有"会虚高覆盖率）
+FILLER_PHRASES = (
+    "怎么处理", "怎么办", "怎么", "什么", "为什么", "有没有", "有没", "是否",
+    "多少", "多久", "多长", "能不能", "可以", "帮我", "请问", "一下", "麻烦",
+    "的", "吗", "呢", "啊", "了", "这", "那",
+)
+
+
+def question_coverage(
+    question: str,
+    texts: Sequence[str],
+    *,
+    entities: Sequence[str] = (),
+) -> float:
+    """问题里的**内容词**在候选文本中的覆盖率（0~1）。
+
+    为什么要单独看这个指标：实测 bge-reranker-large 只要看到型号词就对得上，
+    给"内部完全没收录的主题"也打 0.74~0.84 的高分（见架构说明 13.8）。
+    此时只按重排分判断会以为"资料够了"，联网兜底永远不会触发。
+    覆盖率看的是"问题里的实词有没有出现在资料里"，与重排分互补：
+    型号匹配但主题没收录 → 覆盖率接近 0 → 触发联网。
+    """
+    from app.rag.tokenize import segment, tokens_of
+
+    cleaned = str(question or "")
+    for phrase in FILLER_PHRASES:
+        cleaned = cleaned.replace(phrase, " ")
+
+    entity_tokens: set[str] = set()
+    for entity in entities:
+        name = str(entity or "").strip()
+        if not name:
+            continue
+        entity_tokens.update(tokens_of(name))
+        entity_tokens.add(name.lower())
+
+    tokens = [token for token in tokens_of(cleaned) if token not in entity_tokens]
+    if not tokens:
+        return 1.0
+
+    haystack = set(segment(" ".join(str(text or "") for text in texts)).split())
+    hit = sum(1 for token in tokens if token in haystack)
+    return hit / len(tokens)
+
+
+def should_search(
+    top1: float,
+    *,
+    coverage: float | None = None,
+    settings: Settings | None = None,
+) -> bool:
+    """内部资料证据是否不足到需要联网。
+
+    两个信号任一触发即联网：
+    1. 重排 top1 低于 `MCP_TRIGGER_TOP1`（资料不够对口）；
+    2. 内容词覆盖率低于 `MCP_TRIGGER_COVERAGE`（问的主题资料里根本没有，
+       哪怕型号对得上、重排分虚高）。
+    """
+    settings = settings or get_settings()
+    if not is_enabled(settings):
+        return False
+    if float(top1) < float(settings.mcp_trigger_top1):
+        return True
+    if coverage is not None and float(coverage) < float(settings.mcp_trigger_coverage):
+        return True
+    return False
 
 
 def search(
@@ -410,6 +470,7 @@ def search(
 
 __all__ = [
     "DashScopeMcpSearchClient",
+    "FILLER_PHRASES",
     "MAX_QUERY_CHARS",
     "WebResult",
     "WebSearchClient",
@@ -420,6 +481,7 @@ __all__ = [
     "get_client",
     "is_discriminating_entity",
     "is_enabled",
+    "question_coverage",
     "search",
     "should_search",
 ]

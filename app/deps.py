@@ -65,6 +65,8 @@ class GraphDeps:
     embedder: Embedder | None = None
     vision_provider: Any | None = None
     vision_providers: Sequence[Any] | None = None
+    reranker: Any | None = None
+    web_search: Callable[..., Any] | None = None
     emit: EmitFn | None = None
     _recorded: list[dict[str, Any]] = field(default_factory=list)
 
@@ -170,8 +172,13 @@ def build_deps(
     embedder: Embedder | None = None,
     vision_provider: Any | None = None,
     vision_providers: Sequence[Any] | None = None,
+    reranker: Any | None = None,
+    web_search: Callable[..., Any] | None = None,
     emit: EmitFn | None = None,
 ) -> GraphDeps:
+    from app.rag.reranker import get_reranker
+    from app.rag.web_search import search as web_search_fn
+
     settings = settings or get_settings()
     return GraphDeps(
         settings=settings,
@@ -181,6 +188,8 @@ def build_deps(
         embedder=embedder if embedder is not None else get_embedder(settings),
         vision_provider=vision_provider,
         vision_providers=vision_providers,
+        reranker=reranker if reranker is not None else get_reranker(settings),
+        web_search=web_search if web_search is not None else web_search_fn,
         emit=emit,
     )
 

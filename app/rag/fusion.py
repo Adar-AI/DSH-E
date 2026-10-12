@@ -123,6 +123,31 @@ class Candidate:
             ranks={channel: 0},
         )
 
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Candidate":
+        """从 JSON 安全的字典还原（图状态需要可序列化，不能直接放对象）。"""
+        return cls(
+            key=str(data.get("key") or ""),
+            text=str(data.get("text") or ""),
+            source=str(data.get("source") or SOURCE_INTERNAL),
+            citation=str(data.get("citation") or ""),
+            url=str(data.get("url") or ""),
+            title=str(data.get("title") or ""),
+            hostname=str(data.get("hostname") or ""),
+            chunk_id=data.get("chunk_id"),
+            doc_id=data.get("doc_id"),
+            filename=str(data.get("filename") or ""),
+            section=data.get("section"),
+            page=data.get("page"),
+            base_score=float(data.get("base_score") or 0.0),
+            ranks={str(k): int(v) for k, v in (data.get("ranks") or {}).items()},
+            rrf=float(data.get("rrf") or 0.0),
+            rrf_norm=float(data.get("rrf_norm") or 0.0),
+            rerank_score=(
+                None if data.get("rerank_score") is None else float(data["rerank_score"])
+            ),
+        )
+
 
 def rrf_fuse(
     channels: Mapping[str, Sequence[Candidate]],
