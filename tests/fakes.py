@@ -295,6 +295,17 @@ GOOD_VISION_JSON = (
     ' "summary": "打印机提示 E05，硒鼓未识别", "confidence": 0.9}'
 )
 
+# 工单抽取用的标准 JSON 响应
+GOOD_TICKET_JSON = (
+    '{"customer_request": "打印机报错 E05，希望尽快解决",'
+    ' "product_model": "L3250",'
+    ' "fault_phenomenon": "更换硒鼓后仍提示硒鼓未识别",'
+    ' "error_info": "E05",'
+    ' "tried_actions": "客户已经更换了新硒鼓",'
+    ' "urgency": "较急",'
+    ' "suggestion": "检查硒鼓芯片触点并复位计数器"}'
+)
+
 
 class FakeChatChain:
     """假对话链：`stream()` 逐字产出，`chat()` 一次返回，可配置为直接失败。"""

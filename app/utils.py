@@ -23,7 +23,10 @@ def new_id(prefix: str = "conv") -> str:
 def parse_json_block(text: str | None) -> dict | None:
     """从模型回复里抠出 JSON 对象。
 
-    容忍三种常见情况：```json 围栏、前后有解释性文字、直接就是 JSON。
+    容忍四种常见情况：```json 围栏、前后有解释性文字、直接就是 JSON、
+    以及**字符串里带真实换行**（模型把多行文本塞进字段值，标准 JSON 不允许，
+    但很常见——实测本地 qwen2.5 抽取工单时就会这样）。因此用 `strict=False`
+    放宽控制字符检查，避免把合法语义的输出判成"不是 JSON"而白白回退。
     解析不出来返回 None，由调用方决定重试还是降级，绝不抛异常。
     """
     if not text:
@@ -36,17 +39,18 @@ def parse_json_block(text: str | None) -> dict | None:
         candidate = candidate.strip()
         if not candidate:
             continue
-        try:
-            data = json.loads(candidate)
-        except json.JSONDecodeError:
-            start = candidate.find("{")
-            end = candidate.rfind("}")
-            if start == -1 or end <= start:
-                continue
+        for strict in (True, False):
             try:
-                data = json.loads(candidate[start : end + 1])
+                data = json.loads(candidate, strict=strict)
             except json.JSONDecodeError:
-                continue
-        if isinstance(data, dict):
-            return data
+                start = candidate.find("{")
+                end = candidate.rfind("}")
+                if start == -1 or end <= start:
+                    continue
+                try:
+                    data = json.loads(candidate[start : end + 1], strict=strict)
+                except json.JSONDecodeError:
+                    continue
+            if isinstance(data, dict):
+                return data
     return None

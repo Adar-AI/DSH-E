@@ -18,6 +18,7 @@ from app import db as dbmod
 from app.api import chat as chat_api
 from app.api import conversations as conversations_api
 from app.api import health as health_api
+from app.api import tickets as tickets_api
 from app.config import Settings, get_settings
 from app.deps import start_warmup
 
@@ -55,6 +56,7 @@ def create_app(
     app.include_router(health_api.router)
     app.include_router(chat_api.router)
     app.include_router(conversations_api.router)
+    app.include_router(tickets_api.router)
 
     if WEB_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")

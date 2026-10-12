@@ -122,7 +122,7 @@ def build_fallback_messages(
     vision_summary: str = "",
     history: Sequence[dict] | None = None,
 ) -> list[dict]:
-    """未命中时的兜底回答请求（仍然过一遍模型，让措辞自然）。"""
+    """未命中时的兜底回答请求（仅在 FALLBACK_USE_MODEL=true 时使用）。"""
     messages: list[dict] = [{"role": "system", "content": FALLBACK_SYSTEM}]
 
     for item in history or []:
@@ -145,3 +145,69 @@ def build_fallback_messages(
         }
     )
     return messages
+
+
+# ---------------------------------------------------------------- 工单抽取
+
+TICKET_SYSTEM = """你是售后工单信息抽取助手。
+规则：
+1. 只抽取对话记录中**明确出现**的信息，禁止推断、补全或编造；
+2. 对话里没提到的字段一律填空字符串，不确定就留空；
+3. 每个字段的值必须是**单行文本**，不要在值里换行、不要用 markdown；
+4. `suggestion` 用一两句话概括处理建议，不要整段复制客服回答；
+5. 只输出一个 JSON 对象，不要输出解释文字、不要 markdown 围栏。"""
+
+TICKET_FIELDS_SPEC = """{
+  "customer_request": "客户的核心诉求，一句话",
+  "product_model": "产品型号（如 L3250），没有就空字符串",
+  "fault_phenomenon": "故障现象描述，单行",
+  "error_info": "报错码或屏幕提示文字，多个用、分隔",
+  "tried_actions": "客户已经尝试过的操作，单行",
+  "urgency": "普通 | 较急 | 紧急",
+  "suggestion": "客服给出的处理建议，一两句话概括"
+}"""
+
+TICKET_PROMPT_TEMPLATE = Template("""请从下面的售后对话记录中抽取工单字段，只输出 JSON：
+
+$fields
+
+对话记录：
+$transcript
+
+已知的规则抽取结果（仅供参考；与对话记录冲突时以对话记录为准）：
+$draft""")
+
+TICKET_STRICT_REMINDER = (
+    "\n\n注意：上一次输出无法解析为 JSON。请**只输出一个 JSON 对象**，"
+    "不要任何解释文字、不要 markdown 代码围栏。"
+)
+
+
+def build_ticket_messages(
+    transcript: str,
+    draft: dict | None = None,
+    *,
+    strict: bool = False,
+) -> list[dict]:
+    """组装工单抽取请求（strict=True 用于重试，强调只输出 JSON）。"""
+    draft_lines = []
+    for key, value in (draft or {}).items():
+        if value in (None, "", [], {}):
+            continue
+        if isinstance(value, (list, tuple)):
+            value = "、".join(str(item) for item in value)
+        draft_lines.append(f"- {key}: {value}")
+    draft_text = "\n".join(draft_lines) or "（无）"
+
+    content = TICKET_PROMPT_TEMPLATE.substitute(
+        fields=TICKET_FIELDS_SPEC,
+        transcript=transcript.strip() or "（空）",
+        draft=draft_text,
+    )
+    if strict:
+        content += TICKET_STRICT_REMINDER
+
+    return [
+        {"role": "system", "content": TICKET_SYSTEM},
+        {"role": "user", "content": content},
+    ]
