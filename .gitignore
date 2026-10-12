@@ -239,3 +239,6 @@ data/docs/user/*
 data/test_tmp/
 .tmp/
 .pytest_cache/
+
+# IDE
+.idea/
