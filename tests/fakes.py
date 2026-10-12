@@ -10,6 +10,7 @@ import hashlib
 import math
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Sequence
 
 from app.db import to_vec_blob
@@ -170,3 +171,117 @@ def write_pdf(directory: Path, name: str, pages: Sequence[str]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(make_pdf(pages))
     return path
+
+
+def write_png(
+    directory: Path,
+    name: str = "screenshot.png",
+    size: tuple[int, int] = (8, 8),
+    color: tuple[int, int, int] = (220, 60, 60),
+) -> Path:
+    """生成一张真实的小 PNG，用于验证图片读取与 base64 编码路径。"""
+    from PIL import Image
+
+    path = directory / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, color).save(path)
+    return path
+
+
+# ------------------------------------------------------------ 假 OpenAI 客户端
+
+class _FakeMessage:
+    def __init__(self, content: object) -> None:
+        self.content = content
+
+
+class _FakeChoice:
+    def __init__(self, *, message=None, delta=None) -> None:
+        if message is not None:
+            self.message = message
+        if delta is not None:
+            self.delta = delta
+
+
+class FakeResponse:
+    def __init__(self, content: object) -> None:
+        self.choices = [_FakeChoice(message=_FakeMessage(content))]
+
+
+class _FakeChunk:
+    def __init__(self, content: object) -> None:
+        self.choices = [_FakeChoice(delta=_FakeMessage(content))]
+
+
+class _FakeModelEntry:
+    def __init__(self, identifier: str) -> None:
+        self.id = identifier
+
+
+class FakeModels:
+    def __init__(self, names: Sequence[str] | None = None, error: Exception | None = None) -> None:
+        self.names = list(names or [])
+        self.error = error
+
+    def list(self):
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(data=[_FakeModelEntry(name) for name in self.names])
+
+
+class FakeCompletions:
+    """可编排的假补全接口：固定回复、按序回复、抛错重试、流式与流中断。"""
+
+    def __init__(
+        self,
+        replies: Sequence[object] | None = None,
+        *,
+        error: Exception | None = None,
+        fail_times: int = 0,
+        stream_pieces: Sequence[str] | None = None,
+        stream_error: Exception | None = None,
+    ) -> None:
+        self.replies = list(replies or [])
+        self.error = error
+        self.fail_times = fail_times
+        self.stream_pieces = list(stream_pieces or ["流", "式"])
+        self.stream_error = stream_error
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.fail_times > 0:
+            self.fail_times -= 1
+            raise RuntimeError("模拟网络错误")
+        if self.error is not None:
+            raise self.error
+        if kwargs.get("stream"):
+            def generator():
+                if self.stream_error is not None:
+                    raise self.stream_error
+                for piece in self.stream_pieces:
+                    yield _FakeChunk(piece)
+
+            return generator()
+
+        reply = self.replies.pop(0) if self.replies else "默认回复"
+        if isinstance(reply, Exception):
+            raise reply
+        return FakeResponse(reply)
+
+
+class FakeClient:
+    def __init__(self, completions=None, models=None) -> None:
+        self.chat = SimpleNamespace(completions=completions or FakeCompletions())
+        self.models = models or FakeModels(["fake-model"])
+
+
+def client_factory_for(client: FakeClient):
+    """构造可注入 OpenAICompatProvider 的工厂，并记录收到的连接参数。"""
+
+    def factory(base_url: str, api_key: str, timeout: float) -> FakeClient:
+        factory.calls.append((base_url, api_key, timeout))
+        return client
+
+    factory.calls = []  # type: ignore[attr-defined]
+    return factory

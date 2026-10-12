@@ -29,8 +29,9 @@ FastAPI + uvicorn · LangGraph（含 SQLite checkpointer） · SQLite（FTS5 + s
 # 2. 准备配置：复制模板后填入密钥（.env 已被 .gitignore 忽略）
 Copy-Item .env.example .env
 
-# 3. 准备本地对话模型（首次需下载约 2.6GB）
-ollama pull qwen3:4b
+# 3. 准备本地对话模型（本机已有 qwen2.5:latest，可直接用；否则拉一个指令模型）
+ollama list
+ollama pull qwen3:4b    # 可选：更小更快；不拉也能用 qwen2.5:latest
 ollama serve
 
 # 4. 启动服务（脚本随里程碑补充，最终为 scripts\run.ps1）
