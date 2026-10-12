@@ -75,7 +75,7 @@
     renderEmptyState();
     refreshHealth();
 
-    // 支持深链 /?conv=<会话ID>（工单台的「来源会话」会链到这里）
+    // 支持深链 /?conv=<会话ID>（客服台的「来源会话」会链到这里）
     const requested = new URLSearchParams(window.location.search).get('conv');
     if (requested) {
       switchConversation(requested);
@@ -578,7 +578,7 @@
 
   async function closeConversation() {
     if (!state.conversationId) return;
-    if (!window.confirm('结束本次会话并生成工单？生成后可在工单台查看与流转。')) return;
+    if (!window.confirm('结束本次会话并生成工单？客服会在后台收到并跟进。')) return;
     dom.close.disabled = true;
     try {
       const ticket = await API.closeConversation(state.conversationId);
@@ -608,9 +608,8 @@
         UI.fieldRow('报错信息', ticket.error_info, { empty: '（未识别）' }),
         UI.fieldRow('紧急程度', ticket.urgency),
         el('p', { class: 'muted', style: 'font-size:12px;margin:10px 0 0' }, [
-          `字段来源：${source} ｜ 填充度 ${filled} ｜ 工单台可继续跟进`,
+          `字段来源：${source} ｜ 填充度 ${filled} ｜ 客服已收到，可在后台跟进`,
         ]),
-        el('a', { class: 'btn btn-primary btn-sm', href: '/admin', style: 'margin-top:10px', text: '前往工单台 →' }),
       ]),
     ]);
     const node = el('div', { class: 'msg assistant' }, [avatar('assistant'), el('div', { class: 'msg-body' }, [card])]);

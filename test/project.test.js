@@ -159,6 +159,26 @@ test('前端页面与静态资源完整（引用的文件都存在）', () => {
   assert.ok(read('app/web/selftest.html').includes('id="log"'), '自检页缺少输出容器');
 });
 
+test('客户界面不暴露内部工具入口（V3 权限边界）', () => {
+  const customer = [read('app/web/index.html'), read('app/web/js/chat.js')].join('\n');
+
+  for (const forbidden of ['接口文档', '/docs', '/admin', '工单台']) {
+    assert.equal(
+      customer.includes(forbidden),
+      false,
+      `客户界面不应出现「${forbidden}」（工单台与接口文档是内部工具）`,
+    );
+  }
+
+  // 客服台与开发自检页仍然保留工单台入口
+  assert.ok(read('app/web/admin.html').includes('href="/admin"'), '客服台应保留自身导航');
+  assert.ok(read('app/web/selftest.html').includes('href="/admin"'), '自检页应保留工单台入口');
+  // 接口文档入口在所有页面都移除（/docs 路由保留给开发，不在界面暴露）
+  for (const page of ['app/web/index.html', 'app/web/admin.html', 'app/web/selftest.html']) {
+    assert.equal(read(page).includes('接口文档'), false, `${page} 仍暴露接口文档入口`);
+  }
+});
+
 test('前端脚本不拼接 innerHTML 渲染后端数据（防 XSS）', () => {
   for (const file of [
     'app/web/js/chat.js',
