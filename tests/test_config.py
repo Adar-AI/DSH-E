@@ -87,3 +87,26 @@ def test_describe_masks_keys(monkeypatch):
     # 明文不得出现在摘要里
     assert "sk-fake-PA28" not in str(described)
     assert "sk-fake-9876" not in str(described)
+
+
+def test_env_example_keys_all_exist_in_settings():
+    """防漂移：`.env.example` 里的每个配置项都必须有对应的 Settings 字段。
+
+    这条守卫是有来历的：项目里出现过两次「.env.example 写了、Settings 忘了定义」，
+    结果配置静默失效（RERANK_CLIFF_RATIO 被忽略、MCP_TRIGGER_TOP1 直接报错）。
+    """
+    env_example = BASE_DIR / ".env.example"
+    keys: list[str] = []
+    for raw in env_example.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name = line.split("=", 1)[0].strip()
+        if name and name.replace("_", "").isalnum():
+            keys.append(name.lower())
+
+    assert keys, ".env.example 里没有解析到任何配置项"
+
+    fields = set(Settings.model_fields)
+    missing = sorted({key for key in keys if key not in fields})
+    assert missing == [], f"这些配置项在 Settings 里没有对应字段：{missing}"

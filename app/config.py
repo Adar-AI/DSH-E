@@ -77,6 +77,10 @@ class Settings(BaseSettings):
     mcp_timeout: float = 45.0
     mcp_max_results: int = 5
     mcp_tool_name: str = ""  # 留空则自动挑选名字里带 search 的工具
+    # 内部重排 top1 低于该值才联网（内部优先，不足才联网）
+    mcp_trigger_top1: float = 0.35
+    # 联网结果必须包含问题实体，否则丢弃（防"同名错误码含义不同"污染答案）
+    mcp_require_entity_match: bool = True
 
     # --- 重排（Rerank）---
     # 本地 CrossEncoder 权重路径；为空则退化为「不重排」（用融合分）
@@ -96,6 +100,8 @@ class Settings(BaseSettings):
     confidence_high: float = 0.50
     confidence_low: float = 0.10
     clarify_max_rounds: int = 2
+    # 边界区间是否再问一次 LLM 做实体对齐确认（默认关：省一次模型调用）
+    llm_align_enabled: bool = False
 
     # --- 本地对话模型（默认通道）---
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
