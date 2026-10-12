@@ -16,6 +16,11 @@
     selected: null,
     editing: false,
     saving: false,
+    handoffs: [],
+    convId: null,
+    convLastId: 0,
+    convTimer: null,
+    baseTitle: document.title,
   };
 
   const dom = {};
@@ -30,6 +35,27 @@
     dom.count = document.getElementById('ticket-count');
     dom.rows = document.getElementById('ticket-rows');
     dom.drawer = document.getElementById('drawer');
+    dom.handoffBar = document.getElementById('handoff-bar');
+    dom.handoffList = document.getElementById('handoff-list');
+    dom.handoffWaiting = document.getElementById('handoff-waiting');
+    dom.handoffServing = document.getElementById('handoff-serving');
+    dom.convPanel = document.getElementById('conv-panel');
+    dom.convTitle = document.getElementById('conv-title');
+    dom.convSubtitle = document.getElementById('conv-subtitle');
+    dom.convState = document.getElementById('conv-state');
+    dom.convMessages = document.getElementById('conv-messages');
+    dom.convInput = document.getElementById('conv-input');
+    dom.convSend = document.getElementById('conv-send');
+    dom.convClose = document.getElementById('conv-close');
+
+    dom.convSend.addEventListener('click', sendAgentReply);
+    dom.convClose.addEventListener('click', closeConversationPanel);
+    dom.convInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        sendAgentReply();
+      }
+    });
 
     dom.refresh.addEventListener('click', () => loadTickets(true));
     dom.export.addEventListener('click', () => {
@@ -56,6 +82,130 @@
       const requested = new URLSearchParams(window.location.search).get('ticket');
       if (requested) openTicket(Number(requested));
     });
+    // 转人工提醒：进入页面先拉一次，之后每 5 秒刷新（客户随时可能点"转人工"）
+    loadHandoffs();
+    setInterval(loadHandoffs, 5000);
+  }
+
+  // ------------------------------------------------------------ 转人工（V3）
+
+  async function loadHandoffs() {
+    let data;
+    try {
+      data = await API.handoffs();
+    } catch (error) {
+      console.warn('转人工列表加载失败', error);
+      return;
+    }
+    state.handoffs = data.items || [];
+    renderHandoffBar(data);
+  }
+
+  function renderHandoffBar(data) {
+    const waiting = Number(data.waiting || 0);
+    const serving = Number(data.serving || 0);
+    dom.handoffWaiting.textContent = `等待接入 ${waiting}`;
+    dom.handoffServing.textContent = `人工中 ${serving}`;
+
+    const hasAny = state.handoffs.length > 0;
+    dom.handoffBar.hidden = !hasAny;
+    // 有客户在等：标题闪烁提醒客服（切到别的标签页也能看见）
+    document.title = waiting > 0 ? `【${waiting} 位客户等待人工】${state.baseTitle}` : state.baseTitle;
+    dom.handoffBar.classList.toggle('urgent', waiting > 0);
+
+    UI.clear(dom.handoffList);
+    state.handoffs.forEach((item) => {
+      const waitingSeconds = Number(item.waiting_seconds || 0);
+      const row = el('button', { class: 'handoff-item', type: 'button' }, [
+        el('span', {
+          class: `badge ${item.handoff_state === 'requested' ? 'badge-danger' : 'badge-warn'}`,
+          text: item.handoff_state === 'requested' ? '等待接入' : '人工中',
+        }),
+        el('span', { class: 'handoff-no', text: item.ticket_no || '（未建单）' }),
+        el('span', { class: 'handoff-text', text: item.last_text || item.title || '（无消息）' }),
+        el('span', {
+          class: 'muted',
+          text: `已等待 ${waitingSeconds < 60 ? `${waitingSeconds}s` : `${Math.floor(waitingSeconds / 60)}min`}`,
+        }),
+      ]);
+      row.addEventListener('click', () => openConversationPanel(item));
+      dom.handoffList.append(row);
+    });
+  }
+
+  /** 打开某个客户的会话面板（客服与客户双向对话）。 */
+  async function openConversationPanel(item) {
+    state.convId = item.id;
+    state.convLastId = 0;
+    dom.convPanel.hidden = false;
+    dom.convTitle.textContent = `客户会话 · ${item.ticket_no || item.id}`;
+    dom.convSubtitle.textContent = item.title || '';
+    dom.convState.textContent = item.handoff_state === 'requested' ? '等待接入' : '人工中';
+    UI.clear(dom.convMessages);
+
+    await loadConversationMessages(true);
+    dom.convInput.focus();
+
+    if (state.convTimer) clearInterval(state.convTimer);
+    state.convTimer = setInterval(() => loadConversationMessages(false), 3000);
+  }
+
+  function closeConversationPanel() {
+    dom.convPanel.hidden = true;
+    if (state.convTimer) {
+      clearInterval(state.convTimer);
+      state.convTimer = null;
+    }
+    state.convId = null;
+  }
+
+  async function loadConversationMessages(replace) {
+    if (!state.convId) return;
+    let data;
+    try {
+      data = replace
+        ? await API.messages(state.convId)
+        : await API.messagesAfter(state.convId, state.convLastId);
+    } catch (error) {
+      console.warn('会话消息加载失败', error);
+      return;
+    }
+    if (replace) UI.clear(dom.convMessages);
+    (data.items || []).forEach((message) => {
+      state.convLastId = Math.max(state.convLastId, message.id || 0);
+      appendConversationMessage(message);
+    });
+  }
+
+  function appendConversationMessage(message) {
+    const roleLabel = { user: '客户', agent: '客服', assistant: '机器人', system: '系统' }[message.role] || message.role;
+    const node = el('div', { class: `conv-msg ${message.role}` }, [
+      el('div', { class: 'conv-msg-head' }, [
+        el('span', { class: 'conv-msg-role', text: roleLabel }),
+        el('span', { class: 'muted', text: UI.formatShortTime(message.created_at) }),
+      ]),
+      el('div', { class: 'conv-msg-text', text: message.text || '' }),
+    ]);
+    dom.convMessages.append(node);
+    dom.convMessages.scrollTop = dom.convMessages.scrollHeight;
+  }
+
+  async function sendAgentReply() {
+    const text = dom.convInput.value.trim();
+    if (!state.convId || !text) return;
+    dom.convSend.disabled = true;
+    try {
+      await API.agentReply(state.convId, text);
+      dom.convInput.value = '';
+      dom.convState.textContent = '人工中';
+      await loadConversationMessages(false);
+      loadHandoffs();
+    } catch (error) {
+      UI.toast(`回复失败：${error.message}`, 'error');
+    } finally {
+      dom.convSend.disabled = false;
+      dom.convInput.focus();
+    }
   }
 
   /* ------------------------------------------------------------ 列表 */
@@ -228,14 +378,25 @@
         );
       }
       if (ticket.conv_id) {
+        const convButton = el('button', {
+          class: 'btn btn-sm',
+          type: 'button',
+          text: '💬 打开客户会话',
+        });
+        convButton.addEventListener('click', () =>
+          openConversationPanel({
+            id: ticket.conv_id,
+            ticket_no: ticket.ticket_no,
+            title: ticket.customer_request || '',
+            handoff_state: 'requested',
+          }),
+        );
         section.append(
           el('p', { style: 'font-size:12px;margin:6px 0 0' }, [
             el('span', { class: 'muted', text: '来源会话：' }),
-            el('a', {
-              class: 'mono',
-              href: `/?conv=${encodeURIComponent(ticket.conv_id)}`,
-              text: String(ticket.conv_id).slice(0, 18),
-            }),
+            el('span', { class: 'mono', text: String(ticket.conv_id).slice(0, 18) }),
+            document.createTextNode(' '),
+            convButton,
           ]),
         );
       }

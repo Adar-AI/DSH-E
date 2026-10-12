@@ -105,6 +105,20 @@ const API = (() => {
     conversation: (id) => request(`/api/conversations/${encodeURIComponent(id)}`),
     messages: (id, limit) =>
       request(`/api/conversations/${encodeURIComponent(id)}/messages${buildQuery({ limit })}`),
+    messagesAfter: (id, afterId) =>
+      request(
+        `/api/conversations/${encodeURIComponent(id)}/messages${buildQuery({ after_id: afterId })}`,
+      ),
+    requestHandoff: (id, reason = '') =>
+      request(`/api/conversations/${encodeURIComponent(id)}/handoff${buildQuery({ reason })}`, {
+        method: 'POST',
+      }),
+    handoffs: () => request('/api/handoffs'),
+    agentReply: (id, text) =>
+      request(
+        `/api/conversations/${encodeURIComponent(id)}/agent-messages${buildQuery({ text })}`,
+        { method: 'POST' },
+      ),
     deleteConversation: (id) =>
       request(`/api/conversations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     closeConversation: (id, force = false) =>

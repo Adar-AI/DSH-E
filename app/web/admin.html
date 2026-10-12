@@ -22,6 +22,17 @@
 
     <div class="admin-layout">
       <main class="admin-main">
+        <!-- 转人工提醒条：有客户要求人工时置顶闪烁（V3 F24） -->
+        <section class="handoff-bar" id="handoff-bar" hidden>
+          <div class="handoff-head">
+            <span class="handoff-title">🔔 转人工提醒</span>
+            <span class="badge badge-danger" id="handoff-waiting">等待接入 0</span>
+            <span class="badge badge-warn" id="handoff-serving">人工中 0</span>
+            <span class="muted" id="handoff-tip">点击任意一条即可进入该客户的会话</span>
+          </div>
+          <div class="handoff-list" id="handoff-list"></div>
+        </section>
+
         <div class="toolbar">
           <div class="tabs" id="tabs"></div>
           <input id="search" class="input search" placeholder="搜索工单号 / 诉求 / 型号 / 报错码…" />
@@ -48,8 +59,29 @@
       <aside class="drawer" id="drawer"></aside>
     </div>
 
+    <!-- 客服会话面板：与客户双向对话（V3 F25） -->
+    <section class="conv-panel" id="conv-panel" hidden>
+      <header class="conv-head">
+        <div>
+          <strong id="conv-title">客户会话</strong>
+          <span class="muted" id="conv-subtitle"></span>
+        </div>
+        <div class="conv-head-tools">
+          <span class="badge badge-warn" id="conv-state">等待接入</span>
+          <button class="btn btn-ghost btn-sm" type="button" id="conv-close">✕</button>
+        </div>
+      </header>
+      <div class="conv-messages" id="conv-messages"></div>
+      <div class="conv-composer">
+        <textarea id="conv-input" class="textarea" rows="2"
+          placeholder="以客服身份回复客户…（Ctrl + Enter 发送）"></textarea>
+        <button class="btn btn-primary" type="button" id="conv-send">发送</button>
+      </div>
+    </section>
+
     <div class="hint-bar">
       🧰 工单由「结束会话」自动定稿生成；人工可修正字段、流转状态，所有改动都会记入处理历史。
+      客户要求转人工时会立即建单并出现在上方提醒条里。
     </div>
   </div>
 

@@ -23,6 +23,9 @@
     streaming: false,
     imageFile: null,
     controller: null,
+    lastMessageId: 0,
+    pollTimer: null,
+    handoffState: 'none',
   };
 
   const dom = {};
@@ -34,6 +37,7 @@
     dom.input = document.getElementById('input-text');
     dom.send = document.getElementById('btn-send');
     dom.attach = document.getElementById('btn-attach');
+    dom.human = document.getElementById('btn-human');
     dom.file = document.getElementById('input-file');
     dom.thumb = document.getElementById('thumb');
     dom.convTitle = document.getElementById('conv-title');
@@ -65,6 +69,7 @@
       }
     });
     dom.attach.addEventListener('click', () => dom.file.click());
+    dom.human.addEventListener('click', requestHandoff);
     dom.file.addEventListener('change', onPickImage);
     dom.newChat.addEventListener('click', startNewConversation);
     dom.close.addEventListener('click', closeConversation);
@@ -144,7 +149,8 @@
   }
 
   function avatar(role) {
-    return el('div', { class: 'avatar', text: role === 'user' ? '客' : 'AI' });
+    const label = role === 'user' ? '客' : role === 'agent' ? '客服' : 'AI';
+    return el('div', { class: `avatar ${role}`, text: label });
   }
 
   /** 追加一条消息，返回其内部节点句柄，便于流式更新。 */
@@ -189,13 +195,31 @@
     handle.bubble.append(el('span', { class: 'stage-note', text }));
   }
 
+  /** 系统提示 / 客服接入之类的居中提示条（不属于某一方发言）。 */
+  function appendNotice(text) {
+    if (!text) return;
+    const empty = dom.messages.querySelector('.empty-chat');
+    if (empty) UI.clear(dom.messages);
+    dom.messages.append(el('div', { class: 'notice', text }));
+    scrollToBottom();
+  }
+
   function renderHistoryMessages(items) {
     UI.clear(dom.messages);
+    state.lastMessageId = items.length ? items[items.length - 1].id : 0;
     if (!items.length) {
       renderEmptyState();
       return;
     }
     items.forEach((item) => {
+      if (item.role === 'system') {
+        appendNotice(item.text);
+        return;
+      }
+      if (item.role === 'agent') {
+        appendMessage('agent', { text: item.text });
+        return;
+      }
       const handle = appendMessage(item.role === 'user' ? 'user' : 'assistant', {
         text: item.role === 'user' ? item.text : '',
         imageUrl: item.image_path ? `/uploads/${String(item.image_path).split(/[\\/]/).pop()}` : null,
@@ -215,8 +239,11 @@
         const bits = [UI.formatShortTime(item.created_at)];
         if (trace.provider) bits.push(`通道 ${trace.provider}`);
         if (trace.vision_ok) bits.push(trace.vision_local ? '图片本地识别' : '图片云端识别');
-        if (trace.hit === true) bits.push('命中知识库');
-        if (trace.fallback_used) bits.push('未命中，已兜底');
+        if (trace.confidence === 'high') bits.push('高置信命中知识库');
+        if (trace.confidence === 'low') bits.push('依据不足，已兜底');
+        if (trace.confidence === 'medium') bits.push('证据不足，已请求澄清');
+        if (trace.handoff_used) bits.push('人工客服处理中');
+        if (trace.fallback_used && !trace.confidence) bits.push('未命中，已兜底');
         handle.meta.textContent = bits.join(' · ');
       } else {
         handle.meta.textContent = UI.formatShortTime(item.created_at);
@@ -243,6 +270,16 @@
     dom.infoCount.textContent = String(conversation.message_count ?? '—');
     dom.infoStatus.textContent = conversation.status === 'closed' ? '已结束' : '进行中';
     dom.infoStatus.className = conversation.status === 'closed' ? 'badge badge-muted' : 'badge badge-success';
+
+    // 转人工状态同步：待接入/人工中时继续轮询客服回复（刷新页面也能恢复）
+    state.handoffState = conversation.handoff_state || 'none';
+    if (state.handoffState === 'none' || conversation.status === 'closed') {
+      stopPolling();
+    } else {
+      dom.infoStatus.textContent = state.handoffState === 'claimed' ? '人工客服处理中' : '等待人工接入';
+      dom.infoStatus.className = 'badge badge-warn';
+      startPolling();
+    }
   }
 
   async function restoreConversation() {
@@ -262,6 +299,8 @@
   }
 
   function startNewConversation() {
+    stopPolling();
+    state.handoffState = 'none';
     state.conversationId = null;
     localStorage.removeItem(STORAGE_KEY);
     renderEmptyState();
@@ -455,16 +494,30 @@
               visionFailed = true;
               setNote(handle, `图片识别失败：${data.error || '未知原因'}，将按文字描述处理。`, 'warn');
             }
-          } else if (name === 'retrieval') {
-            chunks = data.chunks || [];
+          } else if (name === 'intent') {
+            if (!answer && data.level) {
+              const label = { high: '问题明确', medium: '需要澄清', low: '信息不足' }[data.level] || data.level;
+              setStage(handle, `意图确认：${label}…`);
+            }
+          } else if (name === 'rerank') {
             if (!answer) {
               setStage(
                 handle,
-                data.hit
-                  ? `已找到 ${chunks.length} 条相关资料，正在生成回答…`
-                  : '内部资料未命中，正在整理建议…',
+                data.kept > 0
+                  ? `已找到 ${data.kept} 条相关资料（相关度 ${(data.top1 || 0).toFixed(2)}），正在生成回答…`
+                  : '内部资料不足，正在整理建议…',
               );
             }
+          } else if (name === 'handoff') {
+            state.handoffState = data.handoff_state || 'requested';
+            if (data.notice) {
+              setNote(handle, data.notice);
+              appendNotice(data.notice);
+            }
+            if (data.ticket_no) {
+              appendNotice(`工单 ${data.ticket_no} 已创建，客服会在后台看到并尽快接入。`);
+            }
+            startPolling();
           } else if (name === 'token') {
             if (!answer) UI.clear(handle.bubble);
             answer += data.text;
@@ -495,8 +548,66 @@
     }
   }
 
-  function finalize(handle, done, chunks, visionNote, visionFailed) {
-    handle.bubble.classList.remove('streaming');
+  // ------------------------------------------------------------ 转人工与轮询
+
+  const POLL_INTERVAL = 3000;
+
+  /** 客户点「转人工客服」：走接口建单，然后开始轮询客服回复。 */
+  async function requestHandoff() {
+    if (!state.conversationId) {
+      UI.toast('请先描述你的问题，再转人工客服', 'warn');
+      return;
+    }
+    dom.human.disabled = true;
+    try {
+      const outcome = await API.requestHandoff(state.conversationId, '客户点击了「转人工客服」');
+      state.handoffState = outcome.handoff_state || 'requested';
+      if (outcome.notice) appendNotice(outcome.notice);
+      if (outcome.ticket && outcome.ticket.ticket_no) {
+        appendNotice(`工单 ${outcome.ticket.ticket_no} 已创建，客服会尽快接入。`);
+      }
+      UI.toast('已转人工客服，请稍候', 'success');
+      startPolling();
+    } catch (error) {
+      UI.toast(`转人工失败：${error.message}`, 'error');
+    } finally {
+      dom.human.disabled = false;
+    }
+  }
+
+  function startPolling() {
+    if (state.pollTimer) return;
+    state.pollTimer = setInterval(pollMessages, POLL_INTERVAL);
+  }
+
+  function stopPolling() {
+    if (!state.pollTimer) return;
+    clearInterval(state.pollTimer);
+    state.pollTimer = null;
+  }
+
+  /** 拉取增量消息：客服发言与系统提示都会在这里出现。 */
+  async function pollMessages() {
+    if (!state.conversationId || state.streaming) return;
+    if (document.hidden) return;
+    try {
+      const data = await API.messagesAfter(state.conversationId, state.lastMessageId);
+      (data.items || []).forEach((item) => {
+        state.lastMessageId = Math.max(state.lastMessageId, item.id || 0);
+        if (item.role === 'agent') {
+          appendMessage('agent', { text: item.text });
+          UI.toast('客服回复了你', 'success');
+        } else if (item.role === 'system') {
+          appendNotice(item.text);
+        }
+      });
+    } catch (error) {
+      // 轮询失败不打扰客户，下一轮再试
+      console.warn('轮询消息失败', error);
+    }
+  }
+
+  function finalize(handle, done, chunks, visionNote, visionFailed) {    handle.bubble.classList.remove('streaming');
     const answer = done.answer || handle.bubble.textContent || '';
     UI.renderRich(handle.bubble, answer);
     if (visionNote && !visionFailed) setNote(handle, visionNote);

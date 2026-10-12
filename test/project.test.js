@@ -179,6 +179,31 @@ test('客户界面不暴露内部工具入口（V3 权限边界）', () => {
   }
 });
 
+test('转人工界面元素齐全（V3 F23-F25）', () => {
+  const customer = read('app/web/index.html');
+  assert.ok(customer.includes('id="btn-human"'), '客户页缺少「转人工客服」按钮');
+
+  const admin = read('app/web/admin.html');
+  for (const id of ['handoff-bar', 'handoff-list', 'handoff-waiting', 'conv-panel', 'conv-messages', 'conv-input', 'conv-send']) {
+    assert.ok(admin.includes(`id="${id}"`), `工单台缺少转人工元素 #${id}`);
+  }
+
+  const chat = read('app/web/js/chat.js');
+  assert.ok(chat.includes('requestHandoff'), '客户页缺少转人工逻辑');
+  assert.ok(chat.includes('messagesAfter'), '客户页缺少客服消息轮询');
+  assert.ok(chat.includes('stopPolling'), '缺少停止轮询逻辑');
+
+  const adminJs = read('app/web/js/admin.js');
+  assert.ok(adminJs.includes('loadHandoffs'), '工单台缺少转人工提醒加载');
+  assert.ok(adminJs.includes('openConversationPanel'), '工单台缺少会话面板');
+  assert.ok(adminJs.includes('sendAgentReply'), '工单台缺少客服回复逻辑');
+
+  const api = read('app/web/js/api.js');
+  for (const method of ['requestHandoff', 'handoffs', 'agentReply', 'messagesAfter']) {
+    assert.ok(api.includes(method), `API 客户端缺少 ${method}`);
+  }
+});
+
 test('前端脚本不拼接 innerHTML 渲染后端数据（防 XSS）', () => {
   for (const file of [
     'app/web/js/chat.js',

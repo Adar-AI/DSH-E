@@ -1191,3 +1191,141 @@ table.tickets tbody tr.active {
     margin-left: 0;
   }
 }
+
+/* ============================================================ 6. 转人工（V3） */
+
+/* 系统提示条（客户页）：不属于某一方发言 */
+.notice {
+  align-self: center;
+  max-width: 80%;
+  margin: 6px auto;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--blue-50, #eff6ff);
+  border: 1px dashed var(--blue-300, #93c5fd);
+  color: var(--blue-700, #1d4ed8);
+  font-size: 12.5px;
+  text-align: center;
+}
+
+/* 客服发言（客户页） */
+.msg.agent .msg-bubble {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+}
+.avatar.agent {
+  background: #16a34a;
+  font-size: 11px;
+}
+
+/* 工单台：转人工提醒条 */
+.handoff-bar {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+}
+.handoff-bar.urgent {
+  animation: handoff-pulse 1.6s ease-in-out infinite;
+}
+@keyframes handoff-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.35); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+.handoff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.handoff-title { font-weight: 600; color: #b91c1c; }
+.handoff-list { display: flex; flex-direction: column; gap: 6px; }
+.handoff-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  background: #fff;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.handoff-item:hover { background: #fff7f7; border-color: #f87171; }
+.handoff-no { font-family: var(--mono, monospace); font-size: 12.5px; color: #b91c1c; }
+.handoff-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #334155;
+  font-size: 13px;
+}
+
+/* 工单台：客服会话面板 */
+.conv-panel {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  height: 560px;
+  max-height: calc(100vh - 120px);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 12px;
+  box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+  z-index: 60;
+}
+.conv-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border, #e2e8f0);
+}
+.conv-head-tools { display: flex; align-items: center; gap: 8px; }
+.conv-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.conv-msg { display: flex; flex-direction: column; gap: 2px; }
+.conv-msg-head { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.conv-msg-role { font-weight: 600; color: #475569; }
+.conv-msg-text {
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid var(--border, #e2e8f0);
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.conv-msg.agent .conv-msg-text { background: #f0fdf4; border-color: #bbf7d0; }
+.conv-msg.user .conv-msg-text { background: #eff6ff; border-color: #bfdbfe; }
+.conv-msg.system .conv-msg-text {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+  font-size: 12.5px;
+}
+.conv-composer {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border, #e2e8f0);
+  align-items: flex-end;
+}
+.conv-composer .textarea { flex: 1; }
