@@ -24,6 +24,8 @@ def test_answer_system_enforces_internal_knowledge_only():
     assert "内部资料中未收录" in ANSWER_SYSTEM
     assert "禁止使用你自己的知识" in ANSWER_SYSTEM
     assert "[序号]" in ANSWER_SYSTEM
+    # 避免模型在结尾单独罗列一堆 [1][2]
+    assert "不要在回答末尾单独罗列引用编号" in ANSWER_SYSTEM
 
 
 def test_format_contexts_numbers_sources():

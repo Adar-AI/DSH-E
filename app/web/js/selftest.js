@@ -14,10 +14,13 @@
     dom.run = document.getElementById('btn-run');
     dom.question = document.getElementById('question');
     dom.summary = document.getElementById('summary');
+    dom.skipChat = document.getElementById('skip-chat');
 
     dom.run.addEventListener('click', run);
 
     const params = new URLSearchParams(window.location.search);
+    // ?auto=1 自动跑；&chat=0 跳过需要等模型的流式对话检查（快速自检连通性）
+    if (params.get('chat') === '0') dom.skipChat.checked = true;
     if (params.get('auto')) {
       dom.question.value = params.get('q') || dom.question.value;
       run();
@@ -33,13 +36,52 @@
     dom.log.append(el('div', { class: 'log-head', text }));
   }
 
+  /** 步骤②：真实跑一轮流式对话，统计事件序列与首包耗时。 */
+  async function checkStreaming(problems) {
+    const question = dom.question.value.trim() || '打印机报错E05怎么处理';
+    log(`提问：${question}`);
+    const counts = {};
+    let answer = '';
+    let citations = [];
+    let firstTokenAt = null;
+    const started = performance.now();
+
+    await API.streamChat({
+      text: question,
+      onEvent: ({ name, data }) => {
+        counts[name] = (counts[name] || 0) + 1;
+        if (name === 'meta') log(`会话：${data.conversation_id}`);
+        else if (name === 'vision') log(`图片识别：ok=${data.ok}`);
+        else if (name === 'retrieval') {
+          citations = data.chunks || [];
+          log(`检索：命中=${data.hit} 最高分=${data.best_score} 模式=${data.mode} 支撑片段=${citations.length}`);
+        } else if (name === 'token') {
+          if (firstTokenAt === null) firstTokenAt = performance.now() - started;
+          answer += data.text;
+        } else if (name === 'draft') {
+          log(`工单草稿字段：${Object.keys(data.draft || {}).join('、') || '（空）'}`);
+        } else if (name === 'error') {
+          problems.push(`服务端返回错误：${data.message}`);
+          log(`错误：${data.message}`, 'error');
+        }
+      },
+    });
+
+    const total = performance.now() - started;
+    log(`事件统计：${Object.entries(counts).map(([key, value]) => `${key}×${value}`).join('，')}`);
+    log(`首包 ${firstTokenAt === null ? '—' : `${firstTokenAt.toFixed(0)}ms`}，整轮 ${total.toFixed(0)}ms`);
+    if (!counts.token) problems.push('没有收到任何 token 事件（流式链路异常）');
+    if (!counts.done) problems.push('没有收到 done 事件（本轮未正常结束）');
+    if (!citations.length) log('本次未命中知识库，走的是兜底话术', 'warn');
+    log(`回答预览：${answer.slice(0, 160) || '（空）'}`);
+  }
+
   async function run() {
     UI.clear(dom.log);
     dom.run.disabled = true;
     dom.summary.textContent = '自检中…';
     const started = performance.now();
     const problems = [];
-
     try {
       heading('① 服务与知识库');
       const health = await API.health();
@@ -56,42 +98,11 @@
       if (!channel.available) problems.push(`对话通道不可用：${channel.reason || ''}`);
 
       heading('② SSE 流式对话（真实调用一次）');
-      const question = dom.question.value.trim() || '打印机报错E05怎么处理';
-      log(`提问：${question}`);
-      const counts = {};
-      let answer = '';
-      let citations = [];
-      let firstTokenAt = null;
-      const chatStarted = performance.now();
-
-      await API.streamChat({
-        text: question,
-        onEvent: ({ name, data }) => {
-          counts[name] = (counts[name] || 0) + 1;
-          if (name === 'meta') log(`会话：${data.conversation_id}`);
-          else if (name === 'vision') log(`图片识别：ok=${data.ok}`);
-          else if (name === 'retrieval') {
-            citations = data.chunks || [];
-            log(`检索：命中=${data.hit} 最高分=${data.best_score} 模式=${data.mode} 支撑片段=${citations.length}`);
-          } else if (name === 'token') {
-            if (firstTokenAt === null) firstTokenAt = performance.now() - chatStarted;
-            answer += data.text;
-          } else if (name === 'draft') {
-            log(`工单草稿字段：${Object.keys(data.draft || {}).join('、') || '（空）'}`);
-          } else if (name === 'error') {
-            problems.push(`服务端返回错误：${data.message}`);
-            log(`错误：${data.message}`, 'error');
-          }
-        },
-      });
-
-      const chatTotal = performance.now() - chatStarted;
-      log(`事件统计：${Object.entries(counts).map(([k, v]) => `${k}×${v}`).join('，')}`);
-      log(`首包 ${firstTokenAt === null ? '—' : firstTokenAt.toFixed(0)}ms，整轮 ${chatTotal.toFixed(0)}ms`);
-      if (!counts.token) problems.push('没有收到任何 token 事件（流式链路异常）');
-      if (!counts.done) problems.push('没有收到 done 事件（本轮未正常结束）');
-      if (!citations.length) log('本次未命中知识库，走的是兜底话术', 'warn');
-      log('回答预览：' + (answer.slice(0, 160) || '（空）'));
+      if (dom.skipChat.checked) {
+        log('已跳过流式对话自检（勾选了「跳过模型调用」）');
+      } else {
+        await checkStreaming(problems);
+      }
 
       heading('③ 工单接口');
       const tickets = await API.tickets({ limit: 5 });

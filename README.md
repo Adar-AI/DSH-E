@@ -36,7 +36,7 @@ Copy-Item .env.example .env
 # 3. 准备本地对话模型（本机已有 qwen2.5:latest，可直接用）
 ollama list
 
-# 4. 把演示资料入库（3 份中文资料 → 15 个分块）
+# 4. 把演示资料入库（3 份中文资料 + 1 份 PDF，共 20 个分块）
 & $py scripts\ingest_samples.py
 ```
 
@@ -49,7 +49,7 @@ ollama list
 # 用真实模型（Ollama + 多模态网关）：读 .env 配置
 .\scripts\run.ps1
 
-# 后端全链路冒烟（健康检查/对话 SSE/图片上传/兜底/工单/流转/导出），15 项检查
+# 后端全链路冒烟（健康检查/静态资源/对话 SSE/图片上传/兜底/工单/字段编辑/流转/导出），18 项检查
 .\scripts\smoke_backend.ps1
 
 # 两套测试一起跑（Node 文档校验 + pytest）
@@ -59,17 +59,76 @@ ollama list
 浏览器打开 <http://127.0.0.1:8000>。脚本会自动定位解释器：`-Python` 参数 >
 `$env:PROJECT_PYTHON` > `C:\Users\19181\PyCharmMiscProject\.venv` > 本机安装 > PATH。
 
+## 用本地 Ollama 测试
+
+本项目默认就走本地 Ollama（离线、零 API 费用），完整步骤如下：
+
+```powershell
+# 1. 确认 Ollama 在跑、模型已在本地
+ollama list                       # 期望看到 qwen2.5:latest（或你想要的指令模型）
+ollama serve                      # 若尚未常驻
+
+# 2. 用真实模型启动服务（默认 auto 模式，会自动预热模型）
+.\scripts\run.ps1
+
+# 3. 自检：确认通道、检索、流式对话、工单接口都通
+.\scripts\smoke_backend.ps1
+#    或打开 http://127.0.0.1:8000/static/selftest.html 点「开始自检」
+```
+
+要点与排错：
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 第一次提问特别慢（60s+） | 本地模型冷启动要把权重读进显存。服务启动时会**后台预热**，等 10~20 秒再提问即可 |
+| `model 'qwen3:4b' not found` | 该模型没下载。`ollama pull qwen3:4b`，或把 `.env` 的 `OLLAMA_MODEL` 改成已有模型 |
+| 回答像"背课文"或答非所问 | 6GB 显存下 7B 模型会部分落到 CPU；可换更小的指令模型，或参考 `docs/架构说明.md` 7.1 的实测数据 |
+| 想换模型/换端口 | 改 `.env` 的 `OLLAMA_MODEL` / `PORT`，重启 `run.ps1` |
+| 不想依赖模型先调前端 | `.\scripts\run.ps1 -Mode mock`，对话与视觉换成确定性假模型 |
+
+## 页面与深链
+
+| 页面 | 地址 | 说明 |
+|---|---|---|
+| 客户对话 | <http://127.0.0.1:8000/> | 文字 + 图片提问，流式回答，右栏工单草稿实时预览 |
+| 人工客服工单台 | <http://127.0.0.1:8000/admin> | 列表筛选、详情、人工修正字段、状态流转、导出 CSV |
+| 前端自检 | <http://127.0.0.1:8000/static/selftest.html> | 不用开发者工具就能定位链路问题 |
+| 接口文档 | <http://127.0.0.1:8000/docs> | Swagger |
+
+深链：`/?conv=<会话ID>` 直接打开某个会话；`/admin?ticket=<工单ID>` 直接打开某张工单。
+
+## 界面预览
+
+| 客户对话页 | 人工客服工单台 |
+|---|---|
+| ![客户对话页](docs/screenshots/01-客户对话页.png) | ![工单台](docs/screenshots/02-工单台.png) |
+
+前端自检页：![前端自检页](docs/screenshots/03-前端自检页.png)
+
 ## 目录结构
 
 ```
-app/        后端：API、LangGraph 图、检索、入库、工单
-app/web/    前端：对话页 index.html、工单台 admin.html
-data/       本地数据：app.db、uploads/、docs/（samples 演示资料入库，user 私有资料不入库）
-docs/       需求规格与架构说明
-scripts/    探测脚本、初始化脚本、启动与测试脚本
-tests/      Python 单测（pytest）
-test/       Node 文档与仓库完整性校验
+app/            后端：API、LangGraph 图、检索、入库、工单
+app/web/        前端：index.html 对话页、admin.html 工单台、selftest.html 自检页、css/、js/
+data/           本地数据：app.db、uploads/、docs/（samples 演示资料入库，user 私有资料不入库）
+docs/           需求规格、架构说明、界面截图
+scripts/        入库 / 启动 / 测试 / 冒烟 / 通道自检 / 资料生成脚本
+tests/          Python 单测（pytest）
+test/           Node 文档与仓库完整性校验
 ```
+
+## 知识库（只读）
+
+知识库是系统回答的**唯一依据**，网页端不提供修改入口，避免误改依据数据。维护方式：
+
+```powershell
+& $py scripts\ingest_samples.py            # 入库 data/docs/samples（演示资料）
+& $py scripts\ingest_samples.py --user     # 入库 data/docs/user（放你的真实 PDF/MD）
+& $py scripts\ingest_samples.py --force    # 文件改过之后重新入库（默认按 sha256 跳过未变化的）
+& $py scripts\ingest_samples.py --rebuild  # 换了嵌入模型后整体重建索引
+```
+
+支持 PDF / MD / TXT。入库后可在对话页提问，或用 `/api/health` 查看文档与分块数。
 
 ## 开发进度
 
@@ -81,8 +140,8 @@ test/       Node 文档与仓库完整性校验
 | M3 | LLM 封装 + 多模态视觉 + 探测脚本 | ✅ 完成 |
 | M4 | LangGraph 对话图 + 多轮记忆 + SSE 接口 | ✅ 完成 |
 | M5 | 工单抽取、落库、状态流转、导出 | ✅ 完成 |
-| M6 | 两个前端页面 + 端到端联调 | ⏳ 进行中 |
-| M7 | 模拟资料入库 + 真实文档通道 + 启动说明 | ⏳ 待开始 |
+| M6 | 前端两页 + 端到端联调 | ✅ 完成 |
+| M7 | 演示资料（含 PDF）+ 启动说明 + 收尾验证 | ✅ 完成 |
 
 ## 开发与测试
 
