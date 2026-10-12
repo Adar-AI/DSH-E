@@ -83,12 +83,58 @@ def test_migration_adds_handoff_columns_to_old_db(work_dir):
     columns = {row[1] for row in raw.execute("PRAGMA table_info(conversations)")}
 
     assert {"handoff_state", "handoff_reason", "handoff_at"} <= columns
-    assert set(applied) == {
+    assert {
         "conversations.handoff_state",
         "conversations.handoff_reason",
         "conversations.handoff_at",
-    }
+    } <= set(applied)
+    assert any("idx_conversations_handoff" in item for item in applied)
     assert dbmod.migrate(raw) == [], "第二次执行不应重复迁移"
+    raw.close()
+
+
+def test_init_db_upgrades_legacy_database_without_crashing(work_dir):
+    """回归：老库直接跑 init_db 也必须成功。
+
+    真机踩过的坑：把 handoff_state 的索引写在 schema.sql 里，
+    老库的 CREATE TABLE IF NOT EXISTS 是空操作（没有该列），建索引直接报
+    "no such column: handoff_state"，服务启动即失败。
+    """
+    legacy = work_dir / "legacy_init.db"
+    raw = sqlite3.connect(legacy)
+    raw.executescript(
+        """
+        CREATE TABLE conversations (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            title TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            ticket_draft_json TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        INSERT INTO conversations(id, title, status, created_at, updated_at)
+        VALUES ('conv-old', '老会话', 'active', '2026-01-01T00:00:00', '2026-01-01T00:00:00');
+        """
+    )
+    raw.commit()
+
+    settings = Settings(
+        _env_file=None,
+        db_path=legacy,
+        upload_dir=work_dir / "u",
+        docs_dir=work_dir / "d",
+        embedding_dim=64,
+    )
+    dbmod.init_db(raw, settings=settings)  # 不应抛异常
+
+    columns = {row[1] for row in raw.execute("PRAGMA table_info(conversations)")}
+    assert "handoff_state" in columns
+    indexes = {row[1] for row in raw.execute("PRAGMA index_list(conversations)")}
+    assert "idx_conversations_handoff" in indexes
+    # 老数据仍在，且默认状态正确
+    row = raw.execute("SELECT title, handoff_state FROM conversations WHERE id = 'conv-old'").fetchone()
+    assert tuple(row) == ("老会话", "none")
     raw.close()
 
 

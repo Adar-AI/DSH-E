@@ -238,6 +238,49 @@ Test-Step '低置信拒答：全新会话缺主语时要求补充型号' {
     Assert-True ($done.Data.citations.Count -eq 0) '拒答不应带引用'
 }
 
+# ---------------------------------------------------------------- 转人工（V3）
+
+Test-Step '转人工：立即建单 + AI 静默 + 客服接入 + 客户可收到' {
+    # ① 客户说"转人工" → 立即建单并给系统提示，本轮不回答
+    $handoffEvents = Invoke-Chat @{ text = '我要转人工客服' }
+    $handoff = Get-SseEvent $handoffEvents 'handoff'
+    $doneH = Get-SseEvent $handoffEvents 'done'
+    Assert-True ($null -ne $handoff) '缺少 handoff 事件'
+    Assert-True ($handoff.Data.handoff_state -eq 'requested') "转人工状态异常：$($handoff.Data.handoff_state)"
+    Assert-True ($handoff.Data.ticket_no -match '^T-\d{8}-\d{4}$') "转人工未立即建单：$($handoff.Data.ticket_no)"
+    Assert-True ($doneH.Data.trace.handoff_used -eq $true) '转人工时 AI 未静默'
+
+    # ② 工单台能看到待接入提醒
+    $pending = Invoke-RestMethod -Uri "$BaseUrl/api/handoffs" -TimeoutSec $TimeoutSec
+    Assert-True ($pending.waiting -ge 1) "待接入计数异常：$($pending.waiting)"
+    $item = $pending.items | Where-Object { $_.ticket_no -eq $handoff.Data.ticket_no } | Select-Object -First 1
+    Assert-True ($null -ne $item) '待接入列表里找不到刚建的工单'
+    $script:handoffConv = $item.id
+
+    # ③ 人工期间客户再提问：仍不回答，只提示等待
+    $again = Invoke-Chat @{ text = '在吗'; conversation_id = $script:handoffConv }
+    $doneAgain = Get-SseEvent $again 'done'
+    Assert-True ($doneAgain.Data.trace.handoff_used -eq $true) '人工期间应继续静默'
+    Assert-True ($doneAgain.Data.trace.handoff_state -eq 'requested') '状态应保持 requested'
+
+    # ④ 客服接入并回复 → 客户轮询（after_id）能拿到 agent 消息
+    $before = (Invoke-RestMethod -Uri "$BaseUrl/api/conversations/$($script:handoffConv)/messages" -TimeoutSec $TimeoutSec).items
+    $lastId = $before[-1].id
+    $replyText = [uri]::EscapeDataString('我是人工客服小李，正在为你处理')
+    $reply = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/conversations/$($script:handoffConv)/agent-messages?text=$replyText" -TimeoutSec $TimeoutSec
+    Assert-True ($reply.handoff_state -eq 'claimed') "客服接入后状态异常：$($reply.handoff_state)"
+
+    $incremental = (Invoke-RestMethod -Uri "$BaseUrl/api/conversations/$($script:handoffConv)/messages?after_id=$lastId" -TimeoutSec $TimeoutSec).items
+    Assert-True ($incremental.Count -ge 1) '客户没有拿到增量消息'
+    Assert-True ($incremental[-1].role -eq 'agent') "增量消息角色异常：$($incremental[-1].role)"
+
+    # ⑤ 结束会话复用同一张工单，且紧急度已提升
+    $closed = Invoke-RestMethod -Method Post -Uri "$BaseUrl/api/conversations/$($script:handoffConv)/close" -TimeoutSec $TimeoutSec
+    Assert-True ($closed.ticket_no -eq $handoff.Data.ticket_no) '结束会话重复建单了'
+    Assert-True ($closed.urgency -in @('较急', '紧急')) "转人工工单紧急度应为较急及以上：$($closed.urgency)"
+    Write-Host ("    转人工工单={0}｜客服已接入｜客户增量收到 {1} 条" -f $closed.ticket_no, $incremental.Count) -ForegroundColor DarkGray
+}
+
 # ---------------------------------------------------------------- 工单定稿
 
 $ticket = $null

@@ -140,9 +140,14 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("conversations", "handoff_at", "TEXT"),
 )
 
+# 索引也在这里建：必须等补列完成之后，否则老库会报 "no such column"（真机踩过）
+_INDEX_MIGRATIONS: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_conversations_handoff ON conversations(handoff_state)",
+)
+
 
 def migrate(conn: sqlite3.Connection) -> list[str]:
-    """按需补列，返回本次真正执行的迁移说明（幂等）。"""
+    """按需补列与补索引，返回本次真正执行的迁移说明（幂等）。"""
     applied: list[str] = []
     for table, column, definition in _COLUMN_MIGRATIONS:
         if not _table_exists(conn, table):
@@ -151,9 +156,22 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
             continue
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         applied.append(f"{table}.{column}")
-    if applied:
-        conn.commit()
+
+    for statement in _INDEX_MIGRATIONS:
+        if not _table_exists(conn, "conversations"):
+            continue
+        name = statement.split(" ON ")[0].replace("CREATE INDEX IF NOT EXISTS ", "")
+        if name in _indexes(conn, "conversations"):
+            continue
+        conn.execute(statement)
+        applied.append(f"index:{name}")
+
+    conn.commit()
     return applied
+
+
+def _indexes(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {str(row[1]) for row in conn.execute(f"PRAGMA index_list({table})")}
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:

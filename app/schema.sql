@@ -74,8 +74,9 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
-
-CREATE INDEX IF NOT EXISTS idx_conversations_handoff ON conversations(handoff_state);
+-- 注意：handoff_state 的索引不写在这里。
+-- 老库执行本文件时 CREATE TABLE IF NOT EXISTS 是空操作，而那时还没有 handoff_state 列，
+-- 直接建索引会报 "no such column" 导致服务起不来。索引统一放到 db.migrate() 里补完列之后再建。
 
 CREATE INDEX IF NOT EXISTS idx_conversations_session ON conversations(session_id);
 
