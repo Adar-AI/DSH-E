@@ -87,7 +87,7 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
         deps.emitter({"type": "stage", "stage": "vision", "message": "正在识别图片…"})
         result = analyze_image(
             state.get("image_path") or "",
-            provider=deps.vision_provider,
+            providers=deps.vision_candidates,
             settings=deps.settings,
             context=str(state.get("text") or ""),
         )
@@ -98,6 +98,10 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
                 "summary": result.summary,
                 "error": result.error,
                 "detail": result.detail,
+                "provider": result.provider,
+                "model": result.model,
+                "local": result.local,
+                "image_info": result.image_info,
             }
         )
         if not result.ok:
@@ -106,12 +110,16 @@ def build_nodes(deps: GraphDeps) -> dict[str, NodeFn]:
                 "vision_error": result.error,
                 "vision_summary": "",
                 "vision_detail": {},
+                "vision_provider": result.provider,
+                "vision_local": result.local,
             }
         return {
             "vision_ok": True,
             "vision_error": "",
             "vision_summary": result.summary,
             "vision_detail": result.detail,
+            "vision_provider": result.provider,
+            "vision_local": result.local,
         }
 
     def rewrite_query(state: GraphState) -> dict[str, Any]:

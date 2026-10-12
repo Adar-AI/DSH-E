@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from app.config import Settings, get_settings
 from app.db import connect as db_connect
@@ -22,9 +22,8 @@ from app.llm.mock import (
 )
 from app.llm.providers import (
     ChatChain,
-    OpenAICompatProvider,
     build_chat_chain,
-    build_vision_provider,
+    build_vision_providers,
 )
 from app.rag.embedder import Embedder, EmbeddingUnavailable, get_embedder
 from app.store import ConversationStore
@@ -64,9 +63,19 @@ class GraphDeps:
     store: ConversationStore
     chat_chain: ChatChain
     embedder: Embedder | None = None
-    vision_provider: OpenAICompatProvider | None = None
+    vision_provider: Any | None = None
+    vision_providers: Sequence[Any] | None = None
     emit: EmitFn | None = None
     _recorded: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def vision_candidates(self) -> list[Any]:
+        """视觉通道候选：注入的（单个/多个）优先，否则用配置组装好的通道链。"""
+        if self.vision_providers:
+            return list(self.vision_providers)
+        if self.vision_provider is not None:
+            return [self.vision_provider]
+        return list(get_vision_providers(self.settings))
 
     @property
     def emitter(self) -> EmitFn:
@@ -91,7 +100,7 @@ class GraphDeps:
 
 _LOCK = threading.Lock()
 _CHAIN: ChatChain | None = None
-_VISION: OpenAICompatProvider | None = None
+_VISION_CHAIN: list[Any] | None = None
 _CHECKPOINTERS: dict[str, Any] = {}
 
 
@@ -108,16 +117,28 @@ def get_chat_chain(settings: Settings | None = None) -> ChatChain:
         return _CHAIN
 
 
-def get_vision_provider(settings: Settings | None = None) -> OpenAICompatProvider:
-    global _VISION
+def get_vision_providers(settings: Settings | None = None) -> list[Any]:
+    """视觉通道链（主通道 + 可选云端回退），进程内缓存。"""
+    global _VISION_CHAIN
     settings = settings or get_settings()
     with _LOCK:
-        if _VISION is None:
+        if _VISION_CHAIN is None:
             if is_mock_mode(settings):
-                _VISION = build_mock_vision_provider(settings)  # type: ignore[assignment]
+                _VISION_CHAIN = [build_mock_vision_provider(settings)]
             else:
-                _VISION = build_vision_provider(settings)
-        return _VISION
+                _VISION_CHAIN = list(build_vision_providers(settings))
+            logger.info(
+                "视觉通道：%s",
+                "、".join(
+                    f"{provider.name}/{provider.model}" for provider in _VISION_CHAIN
+                ),
+            )
+        return _VISION_CHAIN
+
+
+def get_vision_provider(settings: Settings | None = None) -> Any:
+    """兼容旧调用：视觉主通道。"""
+    return get_vision_providers(settings)[0]
 
 
 def get_checkpointer(settings: Settings | None = None) -> Any:
@@ -147,7 +168,8 @@ def build_deps(
     *,
     chat_chain: ChatChain | None = None,
     embedder: Embedder | None = None,
-    vision_provider: OpenAICompatProvider | None = None,
+    vision_provider: Any | None = None,
+    vision_providers: Sequence[Any] | None = None,
     emit: EmitFn | None = None,
 ) -> GraphDeps:
     settings = settings or get_settings()
@@ -157,17 +179,18 @@ def build_deps(
         store=ConversationStore(conn),
         chat_chain=chat_chain or get_chat_chain(settings),
         embedder=embedder if embedder is not None else get_embedder(settings),
-        vision_provider=vision_provider or get_vision_provider(settings),
+        vision_provider=vision_provider,
+        vision_providers=vision_providers,
         emit=emit,
     )
 
 
 def reset_caches() -> None:
     """测试用：清空进程级单例，并关闭 checkpointer 的连接（否则临时目录删不掉）。"""
-    global _CHAIN, _VISION
+    global _CHAIN, _VISION_CHAIN
     with _LOCK:
         _CHAIN = None
-        _VISION = None
+        _VISION_CHAIN = None
         for saver in _CHECKPOINTERS.values():
             conn = getattr(saver, "conn", None)
             if conn is not None:
@@ -226,6 +249,7 @@ __all__ = [
     "get_chat_chain",
     "get_checkpointer",
     "get_vision_provider",
+    "get_vision_providers",
     "reset_caches",
     "start_warmup",
     "warmup",

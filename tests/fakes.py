@@ -389,14 +389,17 @@ class StubVisionProvider:
         available: bool = True,
         reason: str = "已配置",
         error: str | None = None,
+        name: str = "stub-vision",
+        model: str = "stub-vision-model",
+        base_url: str = "fake://vision",
     ) -> None:
         self.reply = reply
         self._available = available
         self.reason = reason
         self.error = error
-        self.name = "stub-vision"
-        self.model = "stub-vision-model"
-        self.base_url = "fake://vision"
+        self.name = name
+        self.model = model
+        self.base_url = base_url
         self.calls: list[list[dict]] = []
 
     def available(self) -> tuple[bool, str]:
@@ -412,3 +415,12 @@ class StubVisionProvider:
 
     def ping(self) -> tuple[bool, str]:
         return self.available()
+
+
+class BrokenVisionProvider(StubVisionProvider):
+    """总是调用失败，用于验证视觉通道回退。"""
+
+    def __init__(self, *, error: str = "本地视觉模型不可用", **kwargs) -> None:
+        kwargs.setdefault("name", "vision-local-broken")
+        kwargs.setdefault("base_url", "http://127.0.0.1:11434/v1")
+        super().__init__(error=error, **kwargs)

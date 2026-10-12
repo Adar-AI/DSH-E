@@ -120,6 +120,8 @@ def stream_chat(
             "best_score": final_state.get("best_score"),
             "hit": final_state.get("hit"),
             "vision_ok": final_state.get("vision_ok"),
+            "vision_provider": final_state.get("vision_provider"),
+            "vision_local": final_state.get("vision_local"),
             "fallback_used": final_state.get("fallback_used"),
             "answer_error": final_state.get("answer_error"),
         }

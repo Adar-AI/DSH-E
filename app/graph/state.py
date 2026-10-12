@@ -25,6 +25,8 @@ class GraphState(TypedDict, total=False):
     vision_ok: bool
     vision_error: str
     vision_detail: dict[str, Any]
+    vision_provider: str
+    vision_local: bool
 
     # ---- 检索 ----
     query: str

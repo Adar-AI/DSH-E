@@ -447,7 +447,8 @@
             if (!answer) setStage(handle, data.message || '处理中…');
           } else if (name === 'vision') {
             if (data.ok) {
-              visionNote = `图片识别结果：\n${data.summary}`;
+              const where = data.local ? '本地模型' : '云端网关';
+              visionNote = `图片识别结果（${where}：${data.model || data.provider || '未知'}）：\n${data.summary}`;
               setNote(handle, visionNote);
             } else {
               visionFailed = true;
@@ -510,6 +511,9 @@
 
     const bits = [UI.formatShortTime(new Date().toISOString())];
     if (done.trace?.provider) bits.push(`通道 ${done.trace.provider}`);
+    if (done.trace?.vision_ok) {
+      bits.push(done.trace.vision_local ? '图片本地识别' : '图片云端识别');
+    }
     bits.push(done.trace?.hit ? '命中知识库' : '未命中，已兜底');
     if (done.trace?.retrieval_mode === 'keyword_only') bits.push('仅关键词检索');
     if (done.answer_error) bits.push(`模型告警：${UI.truncate(done.answer_error, 40)}`);

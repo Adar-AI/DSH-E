@@ -88,7 +88,14 @@
       const channel = (health.chat.channels || [])[0] || {};
       log(`服务状态：${health.status}`);
       log(`对话通道：${channel.name || '—'} · ${channel.model || '—'}（配置${channel.available ? '可用' : '不可用'}）`);
-      log(`多模态通道：${health.vision.model}（${health.vision.available ? '可用' : health.vision.reason}）`);
+      const vision = health.vision || {};
+      log(
+        `多模态通道：${vision.model}（${vision.kind || '—'}${vision.available ? '，可用' : `，${vision.reason}`}）` +
+          (vision.local ? ' ← 本地识别' : ' ← 云端识别'),
+      );
+      if ((vision.channels || []).length > 1) {
+        log(`视觉回退通道：${vision.channels.slice(1).map((item) => `${item.model}（${item.kind}）`).join('、')}`);
+      }
       log(`检索模式：${health.retrieval.mode}，阈值 ${health.retrieval.min_score}`);
       log(`知识库：${health.knowledge.documents} 份文档 / ${health.knowledge.chunks} 个分块 / ${health.knowledge.vectors} 条向量`);
       if (!health.knowledge.documents) {

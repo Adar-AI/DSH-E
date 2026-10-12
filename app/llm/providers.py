@@ -20,14 +20,80 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterator, Protocol, Sequence, runtime_checkable
 
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, is_local_url
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MAX_TOKENS = 1024
 
+# 思考型模型的特征（会先吐一大段推理，正文可能为空）
+THINKING_MODEL_HINTS = (
+    "qwen3",
+    "deepseek-r1",
+    "deepseek-reasoner",
+    "qwq",
+    "magistral",
+    "-think",
+    "reasoning",
+)
+
 ClientFactory = Callable[[str, str, float], Any]
+
+
+def is_thinking_model(model: str | None) -> bool:
+    """判断是否是思考型模型。"""
+    name = (model or "").lower()
+    return any(hint in name for hint in THINKING_MODEL_HINTS)
+
+
+def apply_no_think(
+    messages: Sequence[dict], model: str, *, enabled: bool = True
+) -> list[dict]:
+    """给思考型模型追加 `/no_think` 软开关（qwen3 系支持）。
+
+    实测：本地 `qwen3:4b` 在"依据资料作答"的任务上会把 token 预算全花在推理上，
+    正文直接为空；加上 `/no_think` 才会正常作答。非思考模型原样返回，
+    已经带过标记的不重复追加（多模态消息会把标记挂到文本分段上）。
+    """
+    items = [dict(message) for message in messages]
+    if not enabled or not is_thinking_model(model):
+        return items
+
+    marker = "/no_think"
+
+    def has_marker(value: Any) -> bool:
+        if isinstance(value, str):
+            return marker in value
+        if isinstance(value, list):
+            return any(
+                isinstance(part, dict) and marker in str(part.get("text", ""))
+                for part in value
+            )
+        return False
+
+    if any(has_marker(item.get("content")) for item in items):
+        return items
+
+    def attach(item: dict) -> None:
+        content = item.get("content")
+        if isinstance(content, str):
+            item["content"] = f"{content}\n{marker}"
+        elif isinstance(content, list):
+            item["content"] = [*content, {"type": "text", "text": marker}]
+        else:
+            item["content"] = marker
+
+    for item in items:
+        if item.get("role") == "system":
+            attach(item)
+            return items
+
+    for item in reversed(items):
+        if item.get("role") == "user":
+            attach(item)
+            return items
+    return items
 
 
 class ProviderError(RuntimeError):
@@ -97,6 +163,7 @@ class OpenAICompatProvider:
         temperature: float = DEFAULT_TEMPERATURE,
         max_tokens: int = DEFAULT_MAX_TOKENS,
         max_retries: int = 1,
+        disable_thinking: bool = True,
         client_factory: ClientFactory | None = None,
     ) -> None:
         self.name = name
@@ -108,10 +175,16 @@ class OpenAICompatProvider:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_retries = max_retries
+        self.disable_thinking = disable_thinking
         self._client_factory = client_factory or _default_client_factory
         self._client: Any = None
 
     # ------------------------------------------------------------------ 基础
+
+    @property
+    def is_local(self) -> bool:
+        """是否指向本机（本地 Ollama）。"""
+        return is_local_url(self.base_url)
 
     def available(self) -> tuple[bool, str]:
         """配置层面是否可用（不发网络请求）。"""
@@ -129,7 +202,9 @@ class OpenAICompatProvider:
     def _payload(self, messages: Sequence[dict], **overrides: Any) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
-            "messages": [dict(message) for message in messages],
+            "messages": apply_no_think(
+                messages, self.model, enabled=self.disable_thinking
+            ),
             "temperature": overrides.get("temperature", self.temperature),
             "max_tokens": overrides.get("max_tokens", self.max_tokens),
         }
@@ -297,6 +372,7 @@ def build_chat_chain(settings: Settings | None = None) -> ChatChain:
             api_key="ollama",
             timeout=settings.ollama_timeout,
             requires_key=False,
+            disable_thinking=settings.disable_thinking,
         )
     ]
 
@@ -309,20 +385,56 @@ def build_chat_chain(settings: Settings | None = None) -> ChatChain:
                 api_key=settings.deepseek_api_key,
                 timeout=60.0,
                 requires_key=True,
+                disable_thinking=settings.disable_thinking,
             )
         )
 
     return ChatChain(providers)
 
 
-def build_vision_provider(settings: Settings | None = None) -> OpenAICompatProvider:
-    """多模态通道（图片理解）。"""
+def build_vision_providers(settings: Settings | None = None) -> list[OpenAICompatProvider]:
+    """组装视觉通道链：本地 Ollama 视觉模型（可选）→ 云端网关（可选回退）。
+
+    规则：
+    1. `VISION_BASE_URL / VISION_MODEL / VISION_API_KEY` 优先，留空回落到旧名 `QWEN_*`；
+    2. 主通道指向本机时不要求 API Key（Ollama 不需要）；
+    3. 主通道是本地、且配置了云端 Key 时，按 `VISION_AUTO_CLOUD_FALLBACK` 自动把云端
+       作为第二通道 —— 本地模型没拉下来或加载失败时，图片理解仍可用（并在结果里说明来源）。
+    """
     settings = settings or get_settings()
-    return OpenAICompatProvider(
-        name="vision",
-        base_url=settings.qwen_base_url,
-        model=settings.qwen_vision_model,
-        api_key=settings.qwen_api_key,
-        timeout=settings.qwen_vision_timeout,
-        requires_key=True,
-    )
+
+    base_url = settings.effective_vision_base_url
+    model = settings.effective_vision_model
+    local = is_local_url(base_url)
+
+    providers = [
+        OpenAICompatProvider(
+            name="vision-local" if local else "vision-cloud",
+            base_url=base_url,
+            model=model,
+            api_key=settings.effective_vision_api_key or ("ollama" if local else ""),
+            timeout=settings.effective_vision_timeout,
+            requires_key=not local,
+            disable_thinking=settings.disable_thinking,
+        )
+    ]
+
+    if local and settings.vision_auto_cloud_fallback and settings.qwen_api_key.strip():
+        providers.append(
+            OpenAICompatProvider(
+                name="vision-cloud-fallback",
+                base_url=settings.qwen_base_url,
+                model=settings.qwen_vision_model,
+                api_key=settings.qwen_api_key,
+                timeout=settings.qwen_vision_timeout,
+                requires_key=True,
+                disable_thinking=settings.disable_thinking,
+            )
+        )
+
+    return providers
+
+
+def build_vision_provider(settings: Settings | None = None) -> OpenAICompatProvider:
+    """兼容旧调用：返回视觉主通道。"""
+    return build_vision_providers(settings)[0]

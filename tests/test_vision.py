@@ -14,8 +14,16 @@ from app.llm.vision import (
     detect_image_mime,
     encode_image_data_url,
     normalize_error_codes,
+    prepare_image,
 )
-from fakes import FakeClient, FakeCompletions, client_factory_for, write_png
+from fakes import (
+    BrokenVisionProvider,
+    FakeClient,
+    FakeCompletions,
+    StubVisionProvider,
+    client_factory_for,
+    write_png,
+)
 
 GOOD_JSON = (
     "```json\n"
@@ -205,6 +213,126 @@ def test_describe_detail_joins_known_fields_and_skips_empty():
 
 def test_describe_detail_empty():
     assert describe_detail({}) == ""
+
+
+# -------------------------------------------------------------- 图片预处理
+
+def test_prepare_image_scales_large_image_to_max_side(work_dir):
+    from PIL import Image
+
+    path = work_dir / "huge.png"
+    Image.new("RGB", (3000, 1500), "white").save(path)
+
+    data_url, info = prepare_image(path, max_side=1280)
+
+    assert info["scaled"] is True
+    assert info["original_size"] == [3000, 1500]
+    assert max(info["sent_size"]) == 1280
+    assert info["sent_size"] == [1280, 640]
+    assert info["sent_bytes"] < info["original_bytes"]
+    assert data_url.startswith("data:image/jpeg;base64,")
+
+
+def test_prepare_image_keeps_small_image_untouched(work_dir):
+    from PIL import Image
+
+    path = work_dir / "small.png"
+    Image.new("RGB", (640, 480), "white").save(path)
+
+    data_url, info = prepare_image(path, max_side=1280)
+
+    assert info["scaled"] is False
+    assert info["sent_size"] == [640, 480]
+    # 不需要缩放时原样发送原始字节（不重编码）
+    assert info["sent_bytes"] == info["original_bytes"]
+    assert data_url.startswith("data:image/png;base64,")
+
+
+def test_prepare_image_keeps_transparency_as_png(work_dir):
+    from PIL import Image
+
+    path = work_dir / "logo.png"
+    Image.new("RGBA", (2000, 2000), (255, 0, 0, 128)).save(path)
+
+    data_url, info = prepare_image(path, max_side=1000)
+
+    assert info["scaled"] is True
+    assert data_url.startswith("data:image/png;base64,")
+
+
+def test_prepare_image_without_limit_does_not_scale(work_dir):
+    from PIL import Image
+
+    path = work_dir / "big.png"
+    Image.new("RGB", (2400, 1200), "white").save(path)
+
+    _, info = prepare_image(path, max_side=0)
+
+    assert info["scaled"] is False
+    assert info["sent_size"] == [2400, 1200]
+
+
+# -------------------------------------------------------------- 通道回退链
+
+def test_analyze_image_falls_back_to_second_provider(work_dir):
+    path = write_png(work_dir, "shot.png")
+    broken = BrokenVisionProvider(error="本地模型未拉取")
+    fallback = StubVisionProvider(name="vision-cloud-fallback", model="qwen3.5-omni-plus")
+
+    result = analyze_image(path, providers=[broken, fallback])
+
+    assert result.ok is True
+    assert result.provider == "vision-cloud-fallback"
+    assert result.model == "qwen3.5-omni-plus"
+    assert len(broken.calls) == 1
+
+
+def test_analyze_image_reports_all_channel_errors(work_dir):
+    path = write_png(work_dir, "shot.png")
+    broken = BrokenVisionProvider(error="连接被拒绝")
+    unavailable = StubVisionProvider(name="vision-cloud", available=False, reason="未配置 API Key")
+
+    result = analyze_image(path, providers=[broken, unavailable])
+
+    assert result.ok is False
+    assert "连接被拒绝" in result.error
+    assert "未配置 API Key" in result.error
+
+
+def test_analyze_image_marks_local_provider(work_dir):
+    path = write_png(work_dir, "shot.png")
+    local = StubVisionProvider(name="vision-local", base_url="http://127.0.0.1:11434/v1")
+
+    result = analyze_image(path, providers=[local])
+
+    assert result.ok is True
+    assert result.local is True
+    assert result.image_info["scaled"] is False
+
+
+def test_analyze_image_marks_cloud_provider(work_dir):
+    path = write_png(work_dir, "shot.png")
+    cloud = StubVisionProvider(name="vision-cloud", base_url="https://example.com/v1")
+
+    result = analyze_image(path, providers=[cloud])
+
+    assert result.local is False
+
+
+def test_analyze_image_uses_settings_chain(work_dir):
+    path = write_png(work_dir, "shot.png")
+    settings = Settings(
+        _env_file=None,
+        vision_base_url="http://127.0.0.1:11434/v1",
+        vision_model="qwen2.5vl:3b",
+        qwen_api_key="",
+    )
+    local = StubVisionProvider(name="vision-local")
+
+    result = analyze_image(path, providers=[local], settings=settings)
+
+    assert result.ok is True
+    assert result.image_info["max_side"] == settings.vision_max_side
 
 
 # -------------------------------------------------------------- 错误码规范化

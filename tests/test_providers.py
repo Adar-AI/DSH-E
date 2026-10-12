@@ -6,14 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.config import Settings
+from app.config import Settings, is_local_url
 from app.llm.providers import (
     ChatChain,
     OpenAICompatProvider,
     ProviderError,
     _extract_text,
+    apply_no_think,
     build_chat_chain,
     build_vision_provider,
+    build_vision_providers,
+    is_thinking_model,
 )
 from fakes import FakeClient, FakeCompletions, FakeModels, client_factory_for
 
@@ -266,8 +269,208 @@ def test_build_vision_provider_uses_settings():
 
     provider = build_vision_provider(settings)
 
-    assert provider.name == "vision"
     assert provider.base_url == "https://example.com/v1"
     assert provider.model == "qwen3.5-omni-plus"
     assert provider.timeout == 42.0
     assert provider.available()[0] is True
+
+
+# ------------------------------------------------------------------ 本地/云端
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://127.0.0.1:11434/v1", True),
+        ("http://localhost:11434/v1", True),
+        ("https://dashscope.aliyuncs.com/compatible-mode/v1", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_is_local_url(url, expected):
+    assert is_local_url(url) is expected
+
+
+def test_vision_uses_generic_settings_first():
+    settings = Settings(
+        _env_file=None,
+        vision_base_url="http://127.0.0.1:11434/v1",
+        vision_model="qwen2.5vl:3b",
+        vision_api_key="",
+        qwen_base_url="https://example.com/v1",
+        qwen_api_key="sk-abcd-9999",
+    )
+
+    providers = build_vision_providers(settings)
+
+    primary = providers[0]
+    assert primary.base_url == "http://127.0.0.1:11434/v1"
+    assert primary.model == "qwen2.5vl:3b"
+    assert primary.name == "vision-local"
+    assert primary.is_local is True
+    # 本地通道不需要 Key
+    assert primary.requires_key is False
+    assert primary.available()[0] is True
+    # 配置了云端 Key 时自动挂上回退通道
+    assert [item.name for item in providers] == ["vision-local", "vision-cloud-fallback"]
+    assert providers[1].model == "qwen3.5-omni-plus"
+
+
+def test_vision_falls_back_to_legacy_qwen_settings():
+    settings = Settings(
+        _env_file=None,
+        vision_base_url="",
+        vision_model="",
+        qwen_base_url="https://example.com/v1",
+        qwen_vision_model="qwen3.5-omni-plus",
+        qwen_api_key="sk-abcd-9999",
+    )
+
+    providers = build_vision_providers(settings)
+
+    assert len(providers) == 1
+    assert providers[0].name == "vision-cloud"
+    assert providers[0].base_url == "https://example.com/v1"
+    assert providers[0].requires_key is True
+
+
+def test_vision_cloud_fallback_can_be_disabled():
+    settings = Settings(
+        _env_file=None,
+        vision_base_url="http://127.0.0.1:11434/v1",
+        vision_model="qwen2.5vl:3b",
+        vision_auto_cloud_fallback=False,
+        qwen_api_key="sk-abcd-9999",
+    )
+
+    providers = build_vision_providers(settings)
+
+    assert [item.name for item in providers] == ["vision-local"]
+
+
+def test_local_vision_without_cloud_key_has_single_channel():
+    settings = Settings(
+        _env_file=None,
+        vision_base_url="http://127.0.0.1:11434/v1",
+        vision_model="qwen2.5vl:3b",
+        qwen_api_key="",
+    )
+
+    providers = build_vision_providers(settings)
+
+    assert [item.name for item in providers] == ["vision-local"]
+
+
+# ------------------------------------------------------------------ 思考模型
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("qwen3:4b", True),
+        ("qwen3-vl:2b", True),
+        ("deepseek-r1:8b", True),
+        ("qwq:32b", True),
+        ("qwen2.5:latest", False),
+        ("qwen2.5vl:3b", False),
+        ("", False),
+    ],
+)
+def test_is_thinking_model(model, expected):
+    assert is_thinking_model(model) is expected
+
+
+def test_apply_no_think_appends_to_system_message():
+    messages = [
+        {"role": "system", "content": "你是客服助手。"},
+        {"role": "user", "content": "报错E05怎么办"},
+    ]
+
+    result = apply_no_think(messages, "qwen3:4b")
+
+    assert result[0]["content"].endswith("/no_think")
+    assert result[1]["content"] == "报错E05怎么办"
+    assert messages[0]["content"] == "你是客服助手。", "不应修改原消息"
+
+
+def test_apply_no_think_without_system_uses_last_user_message():
+    messages = [{"role": "user", "content": "你好"}]
+
+    result = apply_no_think(messages, "deepseek-r1:8b")
+
+    assert result[0]["content"].endswith("/no_think")
+
+
+def test_apply_no_think_is_idempotent():
+    messages = [
+        {"role": "system", "content": "系统提示 /no_think"},
+        {"role": "user", "content": "hi"},
+    ]
+
+    result = apply_no_think(messages, "qwen3:4b")
+
+    assert result[0]["content"].count("/no_think") == 1
+
+
+def test_apply_no_think_handles_multimodal_parts():
+    messages = [
+        {"role": "system", "content": "图片分析助手"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看图"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+            ],
+        },
+    ]
+
+    result = apply_no_think(messages, "qwen3-vl:2b")
+
+    # 追加到 system（字符串），多模态分段不受影响
+    assert result[0]["content"].endswith("/no_think")
+    assert len(result[1]["content"]) == 2
+
+
+def test_apply_no_think_multimodal_without_system():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "看图"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}},
+            ],
+        }
+    ]
+
+    result = apply_no_think(messages, "qwen3-vl:2b")
+
+    assert len(result[0]["content"]) == 3
+    assert result[0]["content"][-1]["text"] == "/no_think"
+
+
+def test_apply_no_think_skips_non_thinking_models_and_disabled_flag():
+    messages = [{"role": "system", "content": "x"}]
+
+    assert apply_no_think(messages, "qwen2.5:latest")[0]["content"] == "x"
+    assert apply_no_think(messages, "qwen3:4b", enabled=False)[0]["content"] == "x"
+
+
+def test_payload_disables_thinking_automatically():
+    thinking, thinking_calls, _ = make_provider(
+        model="qwen3:4b", disable_thinking=True
+    )
+    thinking.chat([{"role": "system", "content": "资料如下"}])
+    assert thinking_calls.calls[0]["messages"][0]["content"].endswith("/no_think")
+
+    normal, normal_calls, _ = make_provider(model="qwen2.5:latest")
+    normal.chat([{"role": "system", "content": "资料如下"}])
+    assert "/no_think" not in normal_calls.calls[0]["messages"][0]["content"]
+
+
+def test_payload_can_opt_out_of_thinking_adaptation():
+    provider, calls, _ = make_provider(model="qwen3:4b", disable_thinking=False)
+
+    provider.chat([{"role": "system", "content": "资料如下"}])
+
+    assert "/no_think" not in calls.calls[0]["messages"][0]["content"]

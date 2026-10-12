@@ -41,7 +41,19 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # --- 多模态（图片理解）：OpenAI 兼容网关 ---
+    # --- 图片理解（视觉）通道 ---
+    # 支持两种后端：**本地 Ollama**（离线，推荐）与**云端 OpenAI 兼容网关**。
+    # VISION_* 是通用名；留空时回落到下面的 QWEN_*（向后兼容旧配置）。
+    vision_base_url: str = ""
+    vision_api_key: str = ""
+    vision_model: str = ""
+    vision_timeout: float = 0.0
+    # 本地视觉模型不可用时，是否自动回退到云端网关（需已配置 QWEN_API_KEY）
+    vision_auto_cloud_fallback: bool = True
+    # 编码前的等比缩放（长边像素，0 表示不缩放）：本地小模型对超大图很慢
+    vision_max_side: int = 1280
+
+    # --- 旧名（云端 Qwen 多模态网关），保留以兼容已有 .env ---
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     qwen_api_key: str = ""
     qwen_vision_model: str = "qwen3.5-omni-plus"
@@ -51,6 +63,11 @@ class Settings(BaseSettings):
     # auto：用真实模型（本地 Ollama → 备用通道 → 多模态网关）
     # mock：全部换成离线确定性假模型，用于"先跑通后端逻辑"、前端联调与演示
     llm_mode: str = "auto"
+
+    # --- 思考型模型适配 ---
+    # qwen3 / deepseek-r1 等推理模型会把 token 预算花在思考上（实测正文直接为空），
+    # 打开后自动追加 `/no_think` 软开关；非思考模型不受影响。
+    disable_thinking: bool = True
 
     # --- 本地对话模型（默认通道）---
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
@@ -123,6 +140,25 @@ class Settings(BaseSettings):
     def user_docs_path(self) -> Path:
         return self.docs_path / "user"
 
+    # -------------------------------------------------------- 视觉通道派生配置
+
+    @property
+    def effective_vision_base_url(self) -> str:
+        """视觉通道地址：VISION_BASE_URL 优先，否则回落到 QWEN_BASE_URL。"""
+        return (self.vision_base_url or self.qwen_base_url or "").strip()
+
+    @property
+    def effective_vision_model(self) -> str:
+        return (self.vision_model or self.qwen_vision_model or "").strip()
+
+    @property
+    def effective_vision_api_key(self) -> str:
+        return (self.vision_api_key or self.qwen_api_key or "").strip()
+
+    @property
+    def effective_vision_timeout(self) -> float:
+        return float(self.vision_timeout or self.qwen_vision_timeout or 60.0)
+
     def ensure_dirs(self) -> None:
         """创建运行期需要的目录（幂等）。"""
         for path in (
@@ -156,11 +192,30 @@ class Settings(BaseSettings):
                 "api_key": mask_secret(self.deepseek_api_key),
             },
             "vision": {
-                "base_url": self.qwen_base_url,
-                "model": self.qwen_vision_model,
-                "api_key": mask_secret(self.qwen_api_key),
+                "base_url": self.effective_vision_base_url,
+                "model": self.effective_vision_model,
+                "api_key": mask_secret(self.effective_vision_api_key),
+                "local": is_local_url(self.effective_vision_base_url),
+                "max_side": self.vision_max_side,
+                "auto_cloud_fallback": self.vision_auto_cloud_fallback,
             },
         }
+
+
+LOCAL_HOSTS = {"127.0.0.1", "localhost", "0.0.0.0", "::1", "host.docker.internal"}
+
+
+def is_local_url(url: str | None) -> bool:
+    """判断地址是否指向本机（用于区分"本地 Ollama"与"云端网关"）。"""
+    if not url:
+        return False
+    from urllib.parse import urlparse
+
+    try:
+        host = urlparse(url if "://" in url else f"http://{url}").hostname
+    except ValueError:
+        return False
+    return (host or "").lower() in LOCAL_HOSTS
 
 
 @lru_cache(maxsize=1)

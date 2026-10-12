@@ -60,10 +60,14 @@ def api_client(api_env, monkeypatch):
     # build_deps 走 app.deps 里的名字
     monkeypatch.setattr(deps_module, "get_chat_chain", lambda settings=None: chat_chain)
     monkeypatch.setattr(deps_module, "get_embedder", lambda settings=None: embedder)
-    monkeypatch.setattr(deps_module, "get_vision_provider", lambda settings=None: vision)
+    monkeypatch.setattr(
+        deps_module, "get_vision_providers", lambda settings=None: [vision]
+    )
     # health.py 用的是导入时绑定的名字，需要单独替换
     monkeypatch.setattr(health_module, "get_chat_chain", lambda settings=None: chat_chain)
-    monkeypatch.setattr(health_module, "get_vision_provider", lambda settings=None: vision)
+    monkeypatch.setattr(
+        health_module, "get_vision_providers", lambda settings=None: [vision]
+    )
 
     app = create_app(api_env, warmup_enabled=False)
     with TestClient(app) as client:
@@ -104,11 +108,14 @@ def test_health_reports_channels_without_leaking_keys(api_client):
     assert payload["retrieval"]["mode"] == "keyword_only"
     assert payload["chat"]["channels"][0]["name"] == "fake"
     assert payload["vision"]["model"] == "stub-vision-model"
+    assert payload["vision"]["kind"] in {"本地 Ollama", "云端网关"}
+    assert len(payload["vision"]["channels"]) == 1
+    assert payload["vision"]["channels"][0]["role"] == "主通道"
 
     body = response.text
     assert "sk-" not in body, "健康检查响应里不得出现密钥明文"
-    if payload["vision"]["api_key"]:
-        assert payload["vision"]["api_key"].startswith("*")
+    api_key = payload["vision"]["api_key"]
+    assert api_key.startswith("*") or api_key in {"(未配置)", "（本地通道无需密钥）"}
 
 
 # ------------------------------------------------------------------ 会话接口

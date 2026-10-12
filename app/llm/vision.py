@@ -8,15 +8,20 @@
 from __future__ import annotations
 
 import base64
+import io
 import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
-from app.config import Settings, get_settings
+from app.config import Settings, get_settings, is_local_url
 from app.llm.prompts import VISION_SYSTEM, build_vision_prompt
-from app.llm.providers import OpenAICompatProvider, ProviderError, build_vision_provider
+from app.llm.providers import (
+    OpenAICompatProvider,
+    ProviderError,
+    build_vision_providers,
+)
 from app.utils import parse_json_block
 
 logger = logging.getLogger(__name__)
@@ -89,7 +94,9 @@ class VisionResult:
     error: str = ""
     model: str = ""
     provider: str = ""
+    local: bool = False
     detail: dict[str, Any] = field(default_factory=dict)
+    image_info: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -98,7 +105,9 @@ class VisionResult:
             "error": self.error,
             "model": self.model,
             "provider": self.provider,
+            "local": self.local,
             "detail": self.detail,
+            "image_info": self.image_info,
         }
 
 
@@ -113,11 +122,75 @@ def detect_image_mime(path: Path | str) -> str:
 
 
 def encode_image_data_url(path: Path | str) -> str:
-    """把图片编码成 data URL（内联给模型，不依赖任何图床）。"""
+    """把图片原样编码成 data URL（不缩放；缩放走 prepare_image）。"""
     path = Path(path)
     mime = detect_image_mime(path)
     payload = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime};base64,{payload}"
+
+
+def prepare_image(
+    path: Path | str, *, max_side: int = 1280
+) -> tuple[str, dict[str, Any]]:
+    """读取图片并按需等比缩放，返回 (data URL, 元信息)。
+
+    为什么要缩放：本地小视觉模型对超过 ~1280px 的图，推理耗时随像素数迅速上涨，
+    而识别报错码这类任务在 1280px 已经足够。透明图仍用 PNG，其余转 JPEG 以减小体积。
+    **不需要缩放时原样发送原始字节**（不重编码，省时且不损画质）；
+    缩放失败时同样退回原图，绝不因为"优化"而让识别不可用。
+    """
+    path = Path(path)
+    raw_bytes = path.read_bytes()
+    mime = detect_image_mime(path)
+    info: dict[str, Any] = {
+        "original_bytes": len(raw_bytes),
+        "scaled": False,
+        "max_side": max_side,
+    }
+
+    original_url = (
+        f"data:{mime};base64,{base64.b64encode(raw_bytes).decode('ascii')}"
+    )
+
+    try:
+        from PIL import Image, ImageOps
+
+        with Image.open(io.BytesIO(raw_bytes)) as source:
+            image = ImageOps.exif_transpose(source)
+            width, height = image.size
+            info["original_size"] = [width, height]
+            info["sent_size"] = [width, height]
+
+            if not max_side or max_side <= 0 or max(width, height) <= max_side:
+                info["sent_bytes"] = len(raw_bytes)
+                return original_url, info
+
+            ratio = max_side / float(max(width, height))
+            target = (max(1, int(width * ratio)), max(1, int(height * ratio)))
+            resized = image.resize(target, Image.LANCZOS)
+            info["scaled"] = True
+            info["sent_size"] = list(resized.size)
+
+            buffer = io.BytesIO()
+            if resized.mode in ("RGBA", "LA", "P"):
+                resized.convert("RGBA").save(buffer, format="PNG", optimize=True)
+                mime = "image/png"
+            else:
+                resized.convert("RGB").save(
+                    buffer, format="JPEG", quality=88, optimize=True
+                )
+                mime = "image/jpeg"
+            payload = buffer.getvalue()
+            info["sent_bytes"] = len(payload)
+            return (
+                f"data:{mime};base64,{base64.b64encode(payload).decode('ascii')}",
+                info,
+            )
+    except Exception as exc:  # noqa: BLE001 - 缩放失败退回原图
+        logger.warning("图片缩放失败，改用原图：%s", exc)
+
+    info["sent_bytes"] = len(raw_bytes)
+    return original_url, info
 
 
 def build_vision_messages(context: str, data_url: str) -> list[dict]:
@@ -160,10 +233,15 @@ def analyze_image(
     image_path: Path | str,
     *,
     provider: OpenAICompatProvider | None = None,
+    providers: Sequence[OpenAICompatProvider] | None = None,
     settings: Settings | None = None,
     context: str = "",
 ) -> VisionResult:
-    """分析一张图片。任何失败都返回 ok=False，不抛异常。"""
+    """分析一张图片。任何失败都返回 ok=False，不抛异常。
+
+    通道顺序：`providers`（或单个 `provider`）→ 配置里的视觉链（本地 Ollama 优先，
+    可按 `VISION_AUTO_CLOUD_FALLBACK` 自动回退云端）。逐个尝试，第一个成功即返回。
+    """
     settings = settings or get_settings()
     path = Path(image_path)
 
@@ -182,48 +260,65 @@ def analyze_image(
         )
 
     try:
-        data_url = encode_image_data_url(path)
+        data_url, image_info = prepare_image(path, max_side=settings.vision_max_side)
     except ValueError as exc:
         return VisionResult(ok=False, error=str(exc))
+    except OSError as exc:
+        return VisionResult(ok=False, error=f"读取图片失败：{exc}")
 
-    provider = provider or build_vision_provider(settings)
-    available, reason = provider.available()
-    if not available:
-        return VisionResult(
-            ok=False,
-            error=f"图片理解通道不可用：{reason}",
-            provider=provider.name,
-            model=provider.model,
-        )
+    if providers is not None:
+        candidates = list(providers)
+    elif provider is not None:
+        candidates = [provider]
+    else:
+        candidates = build_vision_providers(settings)
 
     messages = build_vision_messages(context, data_url)
-    try:
-        raw = provider.chat(messages)
-    except ProviderError as exc:
-        logger.warning("图片理解失败：%s", exc)
-        return VisionResult(
-            ok=False, error=str(exc), provider=provider.name, model=provider.model
+    errors: list[str] = []
+
+    for candidate in candidates:
+        available, reason = candidate.available()
+        if not available:
+            errors.append(f"{candidate.name} 不可用：{reason}")
+            continue
+
+        try:
+            raw = candidate.chat(messages)
+        except ProviderError as exc:
+            logger.warning("图片理解失败（%s）：%s", candidate.name, exc)
+            errors.append(f"{candidate.name}：{exc}")
+            continue
+
+        detail = parse_json_block(raw) or {}
+        if detail.get("error_codes"):
+            detail["error_codes"] = normalize_error_codes(detail["error_codes"])
+        summary = describe_detail(detail) if detail else raw.strip()[:500]
+
+        if not summary:
+            errors.append(f"{candidate.name}：模型没有返回可用的图片描述")
+            continue
+
+        local = is_local_url(candidate.base_url)
+        logger.info(
+            "图片识别成功：通道=%s 模型=%s 本地=%s 缩放=%s",
+            candidate.name,
+            candidate.model,
+            local,
+            image_info.get("scaled"),
         )
-
-    detail = parse_json_block(raw) or {}
-    if detail.get("error_codes"):
-        detail["error_codes"] = normalize_error_codes(detail["error_codes"])
-    summary = describe_detail(detail) if detail else raw.strip()[:500]
-
-    if not summary:
         return VisionResult(
-            ok=False,
-            error="模型没有返回可用的图片描述",
+            ok=True,
+            summary=summary,
             raw=raw,
-            provider=provider.name,
-            model=provider.model,
+            provider=candidate.name,
+            model=candidate.model,
+            local=local,
+            detail=detail,
+            image_info=image_info,
         )
 
     return VisionResult(
-        ok=True,
-        summary=summary,
-        raw=raw,
-        provider=provider.name,
-        model=provider.model,
-        detail=detail,
+        ok=False,
+        error="；".join(errors) or "没有可用的图片理解通道",
+        image_info=image_info,
     )

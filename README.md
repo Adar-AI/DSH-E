@@ -83,8 +83,36 @@ ollama serve                      # 若尚未常驻
 | 第一次提问特别慢（60s+） | 本地模型冷启动要把权重读进显存。服务启动时会**后台预热**，等 10~20 秒再提问即可 |
 | `model 'qwen3:4b' not found` | 该模型没下载。`ollama pull qwen3:4b`，或把 `.env` 的 `OLLAMA_MODEL` 改成已有模型 |
 | 回答像"背课文"或答非所问 | 6GB 显存下 7B 模型会部分落到 CPU；可换更小的指令模型，或参考 `docs/架构说明.md` 7.1 的实测数据 |
+| 思考型模型回答为空 | `qwen3` / `deepseek-r1` 把预算花在推理上。代码已自动追加 `/no_think`（`DISABLE_THINKING=false` 可关） |
 | 想换模型/换端口 | 改 `.env` 的 `OLLAMA_MODEL` / `PORT`，重启 `run.ps1` |
 | 不想依赖模型先调前端 | `.\scripts\run.ps1 -Mode mock`，对话与视觉换成确定性假模型 |
+
+### 图片理解也走本地（可选）
+
+```powershell
+ollama pull qwen2.5vl:3b     # 3.2GB，非思考模型、中文 OCR 强
+```
+
+`.env` 默认已指向它（`VISION_BASE_URL=http://127.0.0.1:11434/v1`、`VISION_MODEL=qwen2.5vl:3b`），
+启动后 `/api/health` 会显示：
+
+```
+vision: model=qwen2.5vl:3b  kind=本地 Ollama  local=true
+        channels: vision-local（主通道）→ vision-cloud-fallback（回退通道）
+```
+
+实测数据（本机 RTX 3060 Laptop 6GB）：
+
+| 项 | 结果 |
+|---|---|
+| 纯视觉推理 | 8.5s（560×260 截图） |
+| 一次完整图片问答 | 34.6s —— 6GB 显存装不下两个模型，中间有**两次换页**（文本→视觉→文本） |
+| 文字问答 | 热态 4.9s，冷启动 27.6s |
+| 识别质量 | 正确读出型号 L3250、错误码 E05、报错位置与英文提示，置信度 0.9 |
+| 本地不可用时 | 4.7s 内自动回退云端网关，结果里标明实际通道 |
+
+想更快可以：① 把视觉换成 `qwen3-vl:2b`（1.9GB，换页更快）；② 文本与视觉统一用 `gemma3:4b`（单模型双模态，零换页）；
+③ 或保留市面上识别最好但需联网的云端视觉（把 `VISION_MODEL` 指向云端模型即可）。
 
 ## 页面与深链
 
