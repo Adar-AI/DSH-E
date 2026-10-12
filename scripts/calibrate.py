@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import db as dbmod  # noqa: E402
-from app.config import BASE_DIR, Settings  # noqa: E402
+from app.config import BASE_DIR, Settings, get_settings  # noqa: E402
 from app.ingest.pipeline import ingest_directory  # noqa: E402
 from app.rag.embedder import BGEEmbedder  # noqa: E402
 from app.rag.retriever import hybrid_retrieve  # noqa: E402
@@ -64,6 +64,14 @@ QUESTIONS = [
     "今天北京天气怎么样",
 ]
 
+# 语义不全 / 缺主语的问题：靠 rerank 分数本身区分不出"问得不清楚"，
+# 因此这些用例是用来证明「第一段实体粗判」必需性的（见文档 13.2 两段式判定）。
+INCOMPLETE_QUESTIONS = [
+    "保修期是多少？",
+    "这个多少钱？",
+    "坏了怎么办？",
+]
+
 
 def main() -> int:
     if WORK.exists():
@@ -72,12 +80,24 @@ def main() -> int:
     (CORPUS / "打印机使用手册.md").write_text(MANUAL, encoding="utf-8")
     (CORPUS / "售后服务规则.md").write_text(RULES, encoding="utf-8")
 
+    # 检索/嵌入用固定维度的小语料库；重排与置信阈值沿用 .env 里的真实配置
+    base = get_settings()
     settings = Settings(
         _env_file=None,
         db_path=WORK / "app.db",
         upload_dir=WORK / "uploads",
         docs_dir=WORK / "docs",
         embedding_dim=1024,
+        rerank_model_path=base.rerank_model_path,
+        rerank_device=base.rerank_device,
+        rerank_batch_size=base.rerank_batch_size,
+        rerank_max_length=base.rerank_max_length,
+        rerank_min_score=base.rerank_min_score,
+        rerank_relative_floor=base.rerank_relative_floor,
+        rerank_cliff_ratio=base.rerank_cliff_ratio,
+        rerank_top_k_max=base.rerank_top_k_max,
+        confidence_high=base.confidence_high,
+        confidence_low=base.confidence_low,
     )
     conn = dbmod.connect(settings=settings)
     dbmod.init_db(conn, settings=settings)
@@ -106,8 +126,87 @@ def main() -> int:
             print(f"     {chunk.text[:40].replace(chr(10), ' ')}...")
         print()
 
+    calibrate_rerank(conn, embedder, settings)
+
     conn.close()
     return 0
+
+
+def calibrate_rerank(conn, embedder, settings) -> None:
+    """v2.1：用真实重排模型标定「三档置信」与「动态 TopK」的阈值。"""
+    from app.rag.fusion import (
+        Candidate,
+        apply_rerank_scores,
+        rrf_fuse,
+        select_supporting,
+    )
+    from app.rag.reranker import get_reranker
+
+    reranker = get_reranker(settings)
+    healthy, detail = reranker.health()
+    print(f"\n==== ② 重排分与动态 TopK 标定 ====")
+    print(f"重排器：{reranker.name}｜{detail}")
+    if not healthy:
+        print("⚠️ 重排模型不可用，跳过本段（会退化为词面覆盖率兜底）")
+        return
+
+    def probe(question: str) -> tuple[float, list, object]:
+        # min_score=0 拿到完整候选，便于观察重排分布
+        outcome = hybrid_retrieve(
+            conn, question, embedder=embedder, settings=settings, min_score=0.0
+        )
+        candidates = [
+            Candidate.from_retrieved(chunk.as_dict(), channel="internal:q1")
+            for chunk in outcome.chunks
+        ]
+        if not candidates:
+            return 0.0, [], None
+        fused = rrf_fuse({"internal:q1": candidates})
+        scores = reranker.score(question, [item.text for item in fused])
+        ranked = apply_rerank_scores(fused, scores)
+        selection = select_supporting(
+            ranked,
+            min_score=settings.rerank_min_score,
+            relative_floor=settings.rerank_relative_floor,
+            cliff_ratio=settings.rerank_cliff_ratio,
+            top_k_max=settings.rerank_top_k_max,
+        )
+        return selection.top1, ranked, selection
+
+    print("\n--- 可回答问题（期望：高置信，top1 应明显高于 CONFIDENCE_HIGH）---")
+    for question in QUESTIONS:
+        top1, ranked, selection = probe(question)
+        if not ranked:
+            print(f"Q: {question} → 无候选")
+            continue
+        kept = len(selection.kept) if selection else 0
+        print(f"Q: {question}")
+        print(
+            f"   top1={top1:.3f} 保留 {kept}/{len(ranked)} 条"
+            f"（截断={selection.cutoff if selection else '-'}）"
+        )
+        for item in ranked[:3]:
+            marker = "✔" if selection and item in selection.kept else "✘"
+            print(f"   {marker} {item.rerank_score:.3f} | {item.citation}")
+
+    print("\n--- 语义不全的问题（rerank 分数区分不出「问得清不清楚」→ 必须靠第一段实体粗判）---")
+    for question in INCOMPLETE_QUESTIONS:
+        top1, ranked, selection = probe(question)
+        if not ranked:
+            print(f"Q: {question} → 无候选")
+            continue
+        if top1 >= settings.confidence_high:
+            verdict = "分数不低，但问题缺主语 → 第一段应判 medium/low"
+        elif top1 >= settings.confidence_low:
+            verdict = "落在中置信区间 → 反问澄清"
+        else:
+            verdict = "落在低置信区间 → 拒答"
+        print(f"Q: {question}\n   top1={top1:.3f}（{verdict}）")
+
+    print(f"\n当前配置：CONFIDENCE_HIGH={settings.confidence_high} "
+          f"CONFIDENCE_LOW={settings.confidence_low} "
+          f"RERANK_MIN_SCORE={settings.rerank_min_score} "
+          f"RERANK_RELATIVE_FLOOR={settings.rerank_relative_floor}")
 
 
 if __name__ == "__main__":

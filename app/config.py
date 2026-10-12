@@ -84,9 +84,12 @@ class Settings(BaseSettings):
     rerank_device: str = "cpu"
     rerank_batch_size: int = 8
     rerank_max_length: int = 512
+    # 是否在服务启动时后台预热重排模型（2.1GB，加载约 6.5s，占内存；默认懒加载）
+    warmup_reranker: bool = False
     # 动态 TopK：绝对下限 + 相对断崖 + 条数上限
     rerank_min_score: float = 0.10
     rerank_relative_floor: float = 0.35
+    rerank_cliff_ratio: float = 0.5
     rerank_top_k_max: int = 6
 
     # --- 三档置信判定（高置信检索 / 中置信反问 / 低置信拒答）---

@@ -225,6 +225,12 @@ def warmup(settings: Settings | None = None) -> dict[str, str]:
     except EmbeddingUnavailable as exc:
         report["embedding"] = str(exc)
 
+    if settings.warmup_reranker:
+        from app.rag.reranker import get_reranker
+
+        healthy, detail = get_reranker(settings).health()
+        report["reranker"] = "ok" if healthy else detail
+
     logger.info("预热完成：%s", report)
     return report
 
