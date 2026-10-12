@@ -70,3 +70,72 @@ def conn(settings: Settings):
         yield connection
     finally:
         connection.close()
+
+
+@pytest.fixture()
+def api_env(work_dir: Path, monkeypatch):
+    """把配置指向临时目录（含假模型依赖所需的 64 维嵌入）。"""
+    from app.config import get_settings
+    from app.deps import reset_caches
+
+    monkeypatch.setenv("DB_PATH", str(work_dir / "api.db"))
+    monkeypatch.setenv("UPLOAD_DIR", str(work_dir / "uploads"))
+    monkeypatch.setenv("DOCS_DIR", str(work_dir / "docs"))
+    monkeypatch.setenv("EMBEDDING_DIM", "64")
+    monkeypatch.setenv("EMBEDDING_BATCH_SIZE", "4")
+    monkeypatch.setenv("RETRIEVE_TOP_K", "4")
+    monkeypatch.setenv("RETRIEVE_MIN_SCORE", "0.35")
+    monkeypatch.setenv("CHUNK_SIZE", "60")
+    monkeypatch.setenv("CHUNK_OVERLAP", "10")
+    monkeypatch.setenv("WARMUP_ON_START", "false")
+    monkeypatch.setenv("FALLBACK_LLM_PROVIDER", "none")
+    monkeypatch.setenv("HISTORY_TURNS", "4")
+
+    get_settings.cache_clear()
+    reset_caches()
+    settings = get_settings()
+    settings.ensure_dirs()
+    connection = dbmod.connect(settings=settings)
+    try:
+        dbmod.init_db(connection, settings=settings)
+    finally:
+        connection.close()
+
+    try:
+        yield settings
+    finally:
+        get_settings.cache_clear()
+        reset_caches()
+
+
+@pytest.fixture()
+def events() -> list[dict]:
+    """节点事件收集器（模拟 SSE 的 custom 流）。"""
+    return []
+
+
+@pytest.fixture()
+def make_deps(conn, small_chunk_settings: Settings, events: list[dict]):
+    """构造 GraphDeps 的工厂：所有外部依赖都可替换。"""
+    from app.deps import GraphDeps
+    from app.store import ConversationStore
+    from fakes import FakeChatChain
+
+    def factory(
+        *,
+        chat_chain=None,
+        embedder=None,
+        vision_provider=None,
+        settings: Settings | None = None,
+    ) -> GraphDeps:
+        return GraphDeps(
+            settings=settings or small_chunk_settings,
+            conn=conn,
+            store=ConversationStore(conn),
+            chat_chain=chat_chain or FakeChatChain(),
+            embedder=embedder,
+            vision_provider=vision_provider,
+            emit=events.append,
+        )
+
+    return factory

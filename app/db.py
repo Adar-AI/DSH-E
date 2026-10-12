@@ -75,13 +75,18 @@ def connect(
     *,
     settings: Settings | None = None,
     load_vec: bool = True,
+    check_same_thread: bool = True,
 ) -> sqlite3.Connection:
-    """打开（必要时创建）数据库连接，并完成基础 PRAGMA 设置。"""
+    """打开（必要时创建）数据库连接，并完成基础 PRAGMA 设置。
+
+    `check_same_thread=False` 仅供跨线程复用的场景（如 LangGraph checkpointer），
+    普通请求处理保持默认值，避免误共享连接。
+    """
     settings = settings or get_settings()
     path = Path(db_file) if db_file is not None else settings.db_file
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    conn = sqlite3.connect(str(path))
+    conn = sqlite3.connect(str(path), check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")

@@ -49,8 +49,15 @@ class Settings(BaseSettings):
 
     # --- 本地对话模型（默认通道）---
     ollama_base_url: str = "http://127.0.0.1:11434/v1"
-    ollama_model: str = "qwen3:4b"
+    ollama_model: str = "qwen2.5:latest"
     ollama_timeout: float = 120.0
+
+    # --- 对话行为 ---
+    chat_max_tokens: int = 700
+    history_turns: int = 6
+    # 兜底回答是否交给模型润色。默认 false：兜底话术必须逐字可控，
+    # 否则模型可能把「内部资料未收录」改写成模糊说法，甚至编造无关建议。
+    fallback_use_model: bool = False
 
     # --- 备用对话通道 ---
     fallback_llm_provider: str = "deepseek"
@@ -82,6 +89,7 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     log_level: str = "INFO"
+    warmup_on_start: bool = True
 
     # ------------------------------------------------------------------ 派生路径
 

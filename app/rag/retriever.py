@@ -38,6 +38,13 @@ W_RRF = 0.20
 VEC_FLOOR = 0.35
 VEC_CEIL = 0.85
 
+# 支撑集过滤：与最佳片段差距过大的候选不进提示词。
+# 理由：向量通道总会返回 Top-N（哪怕完全不相关），若不筛掉，无关片段会被塞进
+# 回答提示词，既占用上下文又诱导模型跑题。相对阈值保证「有主有次」，
+# 绝对下限保证不会把全是噪声的结果当成支撑。
+RELATIVE_FLOOR = 0.6
+ABSOLUTE_FLOOR = 0.05
+
 MODE_HYBRID = "hybrid"
 MODE_KEYWORD_ONLY = "keyword_only"
 
@@ -274,8 +281,14 @@ def hybrid_retrieve(
         )
 
     scored.sort(key=lambda item: (-item.score, item.chunk_id))
+    best = scored[0].score if scored else 0.0
+
+    # 只把「够格」的片段作为支撑集返回（见文件顶部 RELATIVE_FLOOR 的说明）
+    if scored:
+        floor = max(best * RELATIVE_FLOOR, ABSOLUTE_FLOOR)
+        scored = [item for item in scored if item.score >= floor]
+
     top = tuple(scored[:top_k])
-    best = top[0].score if top else 0.0
     hit = bool(top) and best >= threshold
 
     return RetrievalOutcome(

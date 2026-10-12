@@ -137,8 +137,9 @@ def build_fallback_messages(
             "role": "user",
             "content": (
                 f"客户问题：{question.strip()}\n"
-                "内部资料中没有检索到相关内容。请按下面模板回复（可以润色措辞，但不要添加任何"
-                "资料里没有的技术细节）：\n\n"
+                "内部资料中没有检索到相关内容。请**必须原样保留**下面模板的第一句话作为回答开头，"
+                "然后可以补上 2~3 条「需要补充的信息」与「建议转人工客服」的说明，"
+                "不要添加任何资料里没有的技术细节：\n\n"
                 + FALLBACK_TEMPLATE.format(question=question.strip(), extra=extra)
             ),
         }

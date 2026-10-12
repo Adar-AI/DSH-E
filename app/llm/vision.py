@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,39 @@ _DETAIL_LABELS = {
     "other_text": "其他文字",
     "summary": "概述",
 }
+
+# 从「ERROR E05」这类描述里抠出真正的错误码（与工单抽取用的是同一套规则）
+_CODE_IN_TEXT_RE = re.compile(r"(?<![A-Za-z0-9])([A-Z]{1,3}\d{1,3})(?![A-Za-z0-9])")
+
+
+def normalize_error_codes(values: object) -> list[str]:
+    """规范化图片返回的错误码。
+
+    模型常把整句提示当成错误码返回（如 `"ERROR E05"`、`"报错码：E05"`），
+    直接拿去检索会把 `error` 这类噪声词混进查询，因此这里只保留真正的编码部分；
+    抠不出编码时保留原文，避免丢信息。
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        items: list[str] = [values]
+    elif isinstance(values, (list, tuple, set)):
+        items = [str(item) for item in values]
+    else:
+        items = [str(values)]
+
+    codes: dict[str, None] = {}
+    for item in items:
+        text = str(item).strip().upper()
+        if not text:
+            continue
+        matches = _CODE_IN_TEXT_RE.findall(text)
+        if matches:
+            for match in matches:
+                codes.setdefault(match, None)
+        else:
+            codes.setdefault(text, None)
+    return list(codes)
 
 
 @dataclass(frozen=True)
@@ -172,6 +206,8 @@ def analyze_image(
         )
 
     detail = parse_json_block(raw) or {}
+    if detail.get("error_codes"):
+        detail["error_codes"] = normalize_error_codes(detail["error_codes"])
     summary = describe_detail(detail) if detail else raw.strip()[:500]
 
     if not summary:

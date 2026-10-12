@@ -285,3 +285,119 @@ def client_factory_for(client: FakeClient):
 
     factory.calls = []  # type: ignore[attr-defined]
     return factory
+
+
+# ------------------------------------------------------- 假对话链 / 假视觉通道
+
+GOOD_VISION_JSON = (
+    '{"kind": "错误截图", "product_model": "L3250", "error_codes": ["E05"],'
+    ' "screen_location": "屏幕中央", "visible_damage": "", "other_text": "请更换硒鼓",'
+    ' "summary": "打印机提示 E05，硒鼓未识别", "confidence": 0.9}'
+)
+
+
+class FakeChatChain:
+    """假对话链：`stream()` 逐字产出，`chat()` 一次返回，可配置为直接失败。"""
+
+    def __init__(
+        self,
+        text: str = "根据资料 [1]，请先检查硒鼓芯片触点是否清洁。",
+        *,
+        error: str | None = None,
+        stream_error: str | None = None,
+        provider: str = "fake",
+        model: str = "fake-model",
+    ) -> None:
+        self.text = text
+        self.error = error
+        self.stream_error = stream_error
+        self.provider = provider
+        self.model = model
+        # 供 /api/health 之类按 provider 遍历的代码使用
+        self.name = provider
+        self.base_url = "fake://local"
+        self.calls: list[list[dict]] = []
+
+    @property
+    def providers(self) -> list[object]:
+        return [self]
+
+    def available(self) -> tuple[bool, str]:
+        return (self.error is None, "已配置" if self.error is None else str(self.error))
+
+    def describe(self) -> list[dict[str, object]]:
+        return [
+            {
+                "name": self.provider,
+                "model": self.model,
+                "base_url": "fake://local",
+                "available": self.error is None,
+                "reason": "已配置" if self.error is None else str(self.error),
+            }
+        ]
+
+    def ping(self) -> tuple[bool, str]:
+        if self.error:
+            return False, str(self.error)
+        return True, "连通"
+
+    def chat(self, messages, **overrides):
+        from app.llm.providers import ChatOutcome, ProviderError
+
+        self.calls.append(list(messages))
+        if self.error:
+            raise ProviderError(str(self.error))
+        return ChatOutcome(text=self.text, provider=self.provider, model=self.model)
+
+    def stream(self, messages, **overrides):
+        from app.llm.providers import ProviderError
+
+        self.calls.append(list(messages))
+        if self.error:
+            raise ProviderError(str(self.error))
+
+        def generator():
+            # 模拟「流到一半断掉」：先产出两个字符再报错
+            if self.stream_error:
+                for piece in list(self.text)[:2]:
+                    yield piece
+                raise ProviderError(str(self.stream_error))
+            for piece in list(self.text):
+                yield piece
+
+        return self.provider, generator()
+
+
+class StubVisionProvider:
+    """假视觉通道：直接返回预设 JSON 文本。"""
+
+    def __init__(
+        self,
+        reply: str = GOOD_VISION_JSON,
+        *,
+        available: bool = True,
+        reason: str = "已配置",
+        error: str | None = None,
+    ) -> None:
+        self.reply = reply
+        self._available = available
+        self.reason = reason
+        self.error = error
+        self.name = "stub-vision"
+        self.model = "stub-vision-model"
+        self.base_url = "fake://vision"
+        self.calls: list[list[dict]] = []
+
+    def available(self) -> tuple[bool, str]:
+        return self._available, self.reason
+
+    def chat(self, messages, **overrides):
+        from app.llm.providers import ProviderError
+
+        self.calls.append(list(messages))
+        if self.error:
+            raise ProviderError(str(self.error))
+        return self.reply
+
+    def ping(self) -> tuple[bool, str]:
+        return self.available()

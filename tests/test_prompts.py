@@ -80,4 +80,6 @@ def test_build_fallback_messages_mentions_no_internal_record():
     assert "内部资料中没有检索到相关内容" in content
     assert "火星上怎么修打印机" in content
     assert "图片是一台打印机" in content
+    # 兜底话术必须原样保留，否则模型会改写成模糊说法
+    assert "原样保留" in content
     assert "转人工" in FALLBACK_TEMPLATE
