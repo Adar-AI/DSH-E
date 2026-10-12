@@ -1,0 +1,31 @@
+# 多模态企业智能客服系统 · Python 依赖
+#
+# 说明：本项目直接复用本机已有的 Python 环境（E:\PyCharmMiscProject），
+# 因此这里只列出「项目直接依赖」，版本为已验证的基线，本机实测版本见行尾注释。
+# 安装：& 'E:\PyCharmMiscProject\python.exe' -m pip install -r requirements.txt
+
+# --- Web 服务 ---
+fastapi>=0.141             # 实测 0.141.1
+uvicorn>=0.52              # 实测 0.52.3
+python-multipart>=0.0.32   # 实测 0.0.32（图片 / 文档 multipart 上传）
+pydantic>=2.13             # 实测 2.13.4
+pydantic-settings>=2.14    # 实测 2.14.2
+python-dotenv>=1.2         # 实测 1.2.2
+
+# --- 编排与多轮记忆 ---
+langgraph>=1.2                     # 实测 1.2.6
+langgraph-checkpoint-sqlite>=3.1   # 实测 3.1.1
+
+# --- 模型调用：统一走 OpenAI 兼容协议（Ollama / DeepSeek / 多模态网关）---
+openai>=2.43               # 实测 2.43.0
+httpx>=0.28                # 实测 0.28.1
+
+# --- 本地知识库 ---
+sqlite-vec>=0.1.9          # 实测 0.1.9（SQLite 向量检索）
+pypdfium2>=5.12            # 实测 5.12.1（PDF 解析）
+pillow>=12.3               # 实测 12.3.0（图片处理）
+sentence-transformers>=6.1 # 实测 6.1.0（加载本地 BGE-M3）
+torch>=2.13                # 实测 2.13.0+cu132
+
+# --- 测试 ---
+pytest>=9.1                # 实测 9.1.1

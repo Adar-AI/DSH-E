@@ -218,3 +218,24 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ---------------------------------------------------------------------------
+# 多模态企业智能客服系统（本仓库应用部分）：本地运行数据一律不入库
+# ---------------------------------------------------------------------------
+
+# 本地数据库（含会话、工单、知识库向量）
+data/app.db
+data/app.db-wal
+data/app.db-shm
+
+# 客户上传的图片
+data/uploads/
+
+# 用户真实资料（演示用模拟资料 data/docs/samples/ 仍然入库）
+data/docs/user/*
+!data/docs/user/.gitkeep
+
+# 测试与运行期临时目录
+data/test_tmp/
+.tmp/
+.pytest_cache/
