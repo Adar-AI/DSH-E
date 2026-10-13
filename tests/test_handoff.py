@@ -10,6 +10,7 @@ from app import db as dbmod
 from app.config import Settings
 from app.handoff import (
     HANDOFF_NOTICE,
+    STATE_DONE,
     STATE_CLAIMED,
     STATE_NONE,
     STATE_REQUESTED,
@@ -284,3 +285,156 @@ def test_messages_after_id_with_limit_keeps_order(conn, conversation):
     result = store.messages(conversation, after_id=0, limit=3)
 
     assert [item["text"] for item in result] == ["我的打印机报错了", "第0条", "第1条"]
+
+
+# ---------------------------------------------------------------- 结束会话（V4）
+
+TICKET_JSON = """{
+  "customer_request": "L3250 报错 E05",
+  "product_model": "L3250",
+  "fault_phenomenon": "屏幕显示 E05",
+  "error_info": "E05",
+  "tried_actions": "已重启",
+  "urgency": "较急",
+  "suggestion": "检查硒鼓芯片触点"
+}"""
+
+
+def test_finish_moves_out_of_bar_and_closes_everything(conn, service, conversation):
+    """V4 核心：结束人工服务后从提醒栏移除，工单置已解决，会话结束，客户收到提示。"""
+    service.request(conversation)
+    service.reply(conversation, "我是客服小李，这就帮你处理")
+    assert len(service.pending()) == 1
+
+    outcome = service.finish(conversation)
+
+    assert outcome["handoff_state"] == STATE_DONE
+    assert outcome["conversation_status"] == "closed"
+    assert service.pending() == [], "结束后不应再占用转人工提醒栏"
+    assert service.is_waiting_human(conversation) is False
+
+    store = ConversationStore(conn)
+    assert store.handoff_state(conversation) == STATE_DONE
+    assert (store.get(conversation) or {}).get("status") == "closed"
+
+    messages = store.messages(conversation)
+    assert messages[-1]["role"] == "system"
+    assert "人工服务已结束" in messages[-1]["text"]
+
+    ticket = outcome["ticket"]
+    assert ticket["status"] == "已解决", "工单应同步为已解决"
+    notes = [event.get("note") or "" for event in TicketService(conn).events(ticket["id"])]
+    assert any("人工服务完成" in note for note in notes)
+
+
+def test_finish_requires_active_handoff(service, conversation):
+    with pytest.raises(LookupError):
+        service.finish(conversation)
+
+
+def test_finish_twice_is_rejected(conn, service, conversation):
+    service.request(conversation)
+    service.finish(conversation)
+
+    with pytest.raises(LookupError):
+        service.finish(conversation)
+
+
+def test_finish_syncs_fields_from_agent_conversation(conn, service, conversation):
+    """把人工阶段的对话重新抽取进工单字段（这里用假模型保证确定）。"""
+    from fakes import FakeChatChain
+
+    service.request(conversation)
+    ConversationStore(conn).add_message(conversation, "user", "型号是 L3250，屏幕显示 E05")
+    service.reply(conversation, "已帮你确认，是硒鼓未识别")
+
+    outcome = service.finish(conversation, chat_chain=FakeChatChain(text=TICKET_JSON))
+
+    assert outcome["extraction"]["source"] == "llm"
+    assert "product_model" in outcome["extraction"]["updated"]
+    assert outcome["ticket"]["product_model"] == "L3250"
+    assert outcome["ticket"]["error_info"] == "E05"
+
+
+def test_finish_without_field_sync_still_closes(conn, service, conversation):
+    service.request(conversation)
+
+    outcome = service.finish(conversation, sync_fields=False)
+
+    assert outcome["extraction"] is None
+    assert outcome["ticket"]["status"] == "已解决"
+    assert service.pending() == []
+
+
+def test_finish_degrades_to_rules_when_model_fails(conn, service, conversation):
+    """模型不可用时抽取器会退化为规则抽取，结束流程照常完成。"""
+    from fakes import FakeChatChain
+
+    service.request(conversation)
+    ConversationStore(conn).add_message(conversation, "user", "型号 L3250 报错 E05")
+
+    outcome = service.finish(conversation, chat_chain=FakeChatChain(error="模型挂了"))
+
+    assert outcome["ticket"]["status"] == "已解决"
+    assert service.pending() == []
+    assert outcome["extraction"]["source"] in {"draft", "rules"}, (
+        f"应退化为规则抽取，实际 {outcome['extraction']['source']}"
+    )
+
+
+def test_finish_survives_extractor_crash(conn, service, conversation, monkeypatch):
+    """抽取过程整体抛异常时也不能阻断结束：只记一条时间线说明。"""
+    import app.tickets.extractor as extractor_module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("抽取器崩了")
+
+    monkeypatch.setattr(extractor_module, "extract_ticket", boom)
+    service.request(conversation)
+
+    outcome = service.finish(conversation)
+
+    assert outcome["ticket"]["status"] == "已解决"
+    assert service.pending() == []
+    assert outcome["extraction"]["source"] == "error"
+    notes = [event.get("note") or "" for event in TicketService(conn).events(outcome["ticket"]["id"])]
+    assert any("同步失败" in note for note in notes)
+
+
+def test_finished_history_keeps_record(conn, service, conversation):
+    service.request(conversation)
+    service.finish(conversation, sync_fields=False)
+
+    history = service.finished()
+
+    assert [item["id"] for item in history] == [conversation]
+    assert history[0]["handoff_state"] == STATE_DONE
+    assert history[0]["ticket_status"] == "已解决"
+
+
+def test_customer_can_continue_after_finish(conn, service, conversation):
+    """结束后机器人恢复服务：不再是人工环节。"""
+    service.request(conversation)
+    service.finish(conversation, sync_fields=False)
+
+    assert service.is_waiting_human(conversation) is False
+
+
+def test_clear_active_removes_bar_entry(conn, service, conversation):
+    """会话被结束时自动清理人工提醒（客户自己去点「结束会话」的情形）。"""
+    service.request(conversation)
+    assert len(service.pending()) == 1
+
+    cleared = service.clear_active(conversation)
+
+    assert cleared is True
+    assert service.pending() == []
+    assert service.state(conversation) == STATE_DONE
+    # 不影响工单状态，只留一条时间线
+    ticket = service._existing_ticket(conversation)
+    notes = [event.get("note") or "" for event in service.tickets.events(int(ticket["id"]))]
+    assert any("自动清理人工提醒" in note for note in notes)
+
+
+def test_clear_active_noop_without_handoff(service, conversation):
+    assert service.clear_active(conversation) is False

@@ -1329,3 +1329,19 @@ table.tickets tbody tr.active {
   align-items: flex-end;
 }
 .conv-composer .textarea { flex: 1; }
+/* ============================================================ 7. 结束会话（V4） */
+
+.btn-success {
+  background: #16a34a;
+  border-color: #16a34a;
+  color: #fff;
+}
+.btn-success:hover:not(:disabled) { background: #15803d; border-color: #15803d; }
+.btn-success:disabled { opacity: .6; cursor: not-allowed; }
+
+.conv-finish-hint {
+  padding: 6px 12px 10px;
+  font-size: 12px;
+  text-align: center;
+  color: #15803d;
+}

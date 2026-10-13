@@ -137,6 +137,45 @@ def list_handoffs():
     return handler()
 
 
+@router.post("/conversations/{conversation_id}/handoff/finish")
+def finish_handoff(
+    conversation_id: str,
+    operator: str = Query("客服", description="操作人（记入工单时间线）"),
+    sync_fields: bool = Query(True, description="是否把人工阶段对话重新抽取进工单字段"),
+):
+    """客服结束人工服务：移出提醒栏 + 工单置已解决 + 会话结束 + 通知客户（V4）。"""
+    settings = get_settings()
+    settings.ensure_dirs()
+    conn = dbmod.connect(settings=settings)
+    try:
+        store = ConversationStore(conn)
+        handoff = HandoffService(conn, settings=settings, store=store)
+        try:
+            outcome = handoff.finish(
+                conversation_id,
+                operator=operator,
+                chat_chain=get_chat_chain(settings) if sync_fields else None,
+                sync_fields=sync_fields,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        outcome["messages"] = store.messages(conversation_id)
+        return outcome
+    finally:
+        conn.close()
+
+
+@router.get("/handoffs/history")
+def handoff_history(limit: int = Query(20, ge=1, le=100)):
+    """最近已结束人工服务的会话（工单台回看用；提醒栏不展示）。"""
+
+    @_with_handoff
+    def handler(handoff: HandoffService, store: ConversationStore):
+        return {"items": handoff.finished(limit=limit)}
+
+    return handler()
+
+
 @router.post("/conversations/{conversation_id}/agent-messages")
 def agent_reply(conversation_id: str, text: str = Query(..., min_length=1)):
     """客服发言：写入 role=agent 的消息，首次发言自动接入（需求 F25）。"""
@@ -176,7 +215,14 @@ def close_conversation(
         except LookupError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
+        # 会话结束：若还在人工环节，顺手清掉转人工提醒，避免已完成的信息一直占用提醒栏
+        store = ConversationStore(conn)
+        handoff_cleared = HandoffService(conn, settings=settings, store=store).clear_active(
+            conversation_id
+        )
+
         ticket["events"] = service.events(int(ticket["id"]))
+        ticket["handoff_cleared"] = handoff_cleared
         return ticket
     finally:
         conn.close()

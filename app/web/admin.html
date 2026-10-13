@@ -68,6 +68,8 @@
         </div>
         <div class="conv-head-tools">
           <span class="badge badge-warn" id="conv-state">等待接入</span>
+          <button class="btn btn-success btn-sm" type="button" id="conv-finish"
+            title="问题已解决：结束人工服务并从提醒栏移除，工单置已解决">✅ 结束会话</button>
           <button class="btn btn-ghost btn-sm" type="button" id="conv-close">✕</button>
         </div>
       </header>
@@ -76,6 +78,9 @@
         <textarea id="conv-input" class="textarea" rows="2"
           placeholder="以客服身份回复客户…（Ctrl + Enter 发送）"></textarea>
         <button class="btn btn-primary" type="button" id="conv-send">发送</button>
+      </div>
+      <div class="conv-finish-hint muted" id="conv-finish-hint" hidden>
+        正在同步工单字段，请稍候…（把人工阶段的对话整理进工单）
       </div>
     </section>
 

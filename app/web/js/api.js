@@ -114,6 +114,13 @@ const API = (() => {
         method: 'POST',
       }),
     handoffs: () => request('/api/handoffs'),
+    handoffHistory: (limit = 20) => request(`/api/handoffs/history${buildQuery({ limit })}`),
+    finishHandoff: (id, { operator = '客服', syncFields = true } = {}) =>
+      request(
+        `/api/conversations/${encodeURIComponent(id)}/handoff/finish` +
+          buildQuery({ operator, sync_fields: syncFields }),
+        { method: 'POST' },
+      ),
     agentReply: (id, text) =>
       request(
         `/api/conversations/${encodeURIComponent(id)}/agent-messages${buildQuery({ text })}`,

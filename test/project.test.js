@@ -197,9 +197,18 @@ test('转人工界面元素齐全（V3 F23-F25）', () => {
   assert.ok(adminJs.includes('loadHandoffs'), '工单台缺少转人工提醒加载');
   assert.ok(adminJs.includes('openConversationPanel'), '工单台缺少会话面板');
   assert.ok(adminJs.includes('sendAgentReply'), '工单台缺少客服回复逻辑');
+  // V4：客服处理完毕要能结束会话（从提醒栏移除并同步工单）
+  assert.ok(admin.includes('id="conv-finish"'), '工单台缺少「结束会话」按钮');
+  assert.ok(adminJs.includes('finishHandoff'), '工单台缺少结束会话逻辑');
 
   const api = read('app/web/js/api.js');
-  for (const method of ['requestHandoff', 'handoffs', 'agentReply', 'messagesAfter']) {
+  for (const method of [
+    'requestHandoff',
+    'handoffs',
+    'agentReply',
+    'messagesAfter',
+    'finishHandoff',
+  ]) {
     assert.ok(api.includes(method), `API 客户端缺少 ${method}`);
   }
 });

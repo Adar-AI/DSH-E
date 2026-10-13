@@ -47,9 +47,12 @@
     dom.convInput = document.getElementById('conv-input');
     dom.convSend = document.getElementById('conv-send');
     dom.convClose = document.getElementById('conv-close');
+    dom.convFinish = document.getElementById('conv-finish');
+    dom.convFinishHint = document.getElementById('conv-finish-hint');
 
     dom.convSend.addEventListener('click', sendAgentReply);
     dom.convClose.addEventListener('click', closeConversationPanel);
+    dom.convFinish.addEventListener('click', finishHandoff);
     dom.convInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
         event.preventDefault();
@@ -206,6 +209,50 @@
       dom.convSend.disabled = false;
       dom.convInput.focus();
     }
+  }
+
+  /**
+   * 结束人工服务（V4）：把会话移出「转人工提醒」栏，
+   * 同时同步工单（重新抽取人工阶段对话 + 置已解决）与客户侧系统提示。
+   */
+  async function finishHandoff() {
+    if (!state.convId) return;
+    const convId = state.convId;
+    const confirmed = window.confirm(
+      '确认客户问题已解决并结束本次人工服务？\n\n' +
+        '· 该会话将从「转人工提醒」栏移除\n' +
+        '· 工单状态置为「已解决」，并把人工阶段的对话同步进工单字段\n' +
+        '· 客户会收到一条「人工服务已结束」的提示',
+    );
+    if (!confirmed) return;
+
+    dom.convFinish.disabled = true;
+    dom.convSend.disabled = true;
+    dom.convFinishHint.hidden = false;
+    try {
+      const outcome = await API.finishHandoff(convId);
+      const ticketNo = (outcome.ticket || {}).ticket_no || '（无关联工单）';
+      const status = (outcome.ticket || {}).status || '';
+      const updated = (outcome.extraction || {}).updated || [];
+      UI.toast(
+        `已结束人工服务：${ticketNo} ${status}` +
+          (updated.length ? `，同步字段 ${updated.length} 项` : ''),
+        'success',
+      );
+      closeConversationPanel();
+      await Promise.all([loadHandoffs(), loadTickets(), refreshOpenedTicket()]);
+    } catch (error) {
+      UI.toast(`结束会话失败：${error.message}`, 'error');
+    } finally {
+      dom.convFinish.disabled = false;
+      dom.convSend.disabled = false;
+      dom.convFinishHint.hidden = true;
+    }
+  }
+
+  /** 若抽屉里正开着同一张工单，刷新它以看到「已解决」。 */
+  async function refreshOpenedTicket() {
+    if (state.selected) await openTicket(state.selected, true);
   }
 
   /* ------------------------------------------------------------ 列表 */

@@ -462,3 +462,98 @@ def test_agent_reply_requires_handoff(api_client):
 def test_handoff_unknown_conversation_returns_404(api_client):
     client, _, _ = api_client
     assert client.post("/api/conversations/conv-missing/handoff").status_code == 404
+
+# ---------------------------------------------------------------- 结束会话（V4）
+
+
+def test_finish_handoff_endpoint_clears_bar_and_resolves_ticket(api_client):
+    """客服在工单台点「结束会话」：提醒栏清空、工单已解决、客户收到系统提示。"""
+    client, _, _ = api_client
+    events = parse_sse(client.post("/api/chat", data={"text": "我要转人工"}).text)
+    conv_id = event_data(events, "meta")["conversation_id"]
+    ticket_no = event_data(events, "handoff")["ticket_no"]
+    client.post(f"/api/conversations/{conv_id}/agent-messages", params={"text": "客服在"})
+    assert client.get("/api/handoffs").json()["serving"] == 1
+
+    outcome = client.post(f"/api/conversations/{conv_id}/handoff/finish").json()
+
+    assert outcome["handoff_state"] == "done"
+    assert outcome["conversation_status"] == "closed"
+    assert outcome["ticket"]["ticket_no"] == ticket_no
+    assert outcome["ticket"]["status"] == "已解决"
+    assert "人工服务已结束" in outcome["notice"]
+
+    summary = client.get("/api/handoffs").json()
+    assert summary["waiting"] == 0 and summary["serving"] == 0, "结束后不应再占用提醒栏"
+    assert summary["items"] == []
+
+    # 会话与客户侧同步
+    conversation = client.get(f"/api/conversations/{conv_id}").json()
+    assert conversation["handoff_state"] == "done"
+    assert conversation["status"] == "closed"
+    messages = client.get(f"/api/conversations/{conv_id}/messages").json()["items"]
+    assert messages[-1]["role"] == "system"
+    assert "人工服务已结束" in messages[-1]["text"]
+
+    # 工单时间线留痕
+    ticket = client.get(f"/api/tickets/{outcome['ticket']['id']}").json()
+    notes = [event.get("note") or "" for event in ticket["events"]]
+    assert any("人工服务完成" in note for note in notes)
+
+
+def test_finish_handoff_history_endpoint(api_client):
+    client, _, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "转人工"}).text)
+    conv_id = client.get("/api/handoffs").json()["items"][0]["id"]
+    client.post(f"/api/conversations/{conv_id}/handoff/finish")
+
+    history = client.get("/api/handoffs/history").json()["items"]
+
+    assert len(history) == 1
+    assert history[0]["id"] == conv_id
+    assert history[0]["handoff_state"] == "done"
+
+
+def test_finish_handoff_without_active_handoff_returns_404(api_client):
+    client, _, _ = api_client
+    conv_id = client.post("/api/conversations", params={"title": "没转人工"}).json()["id"]
+
+    response = client.post(f"/api/conversations/{conv_id}/handoff/finish")
+
+    assert response.status_code == 404
+
+
+def test_finish_handoff_unknown_conversation_returns_404(api_client):
+    client, _, _ = api_client
+    assert client.post("/api/conversations/conv-missing/handoff/finish").status_code == 404
+
+
+def test_ai_resumes_after_finish(api_client, seeded):
+    """结束人工后客户继续提问：机器人恢复服务（不再是人工环节）。"""
+    client, chain, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "转人工"}).text)
+    conv_id = client.get("/api/handoffs").json()["items"][0]["id"]
+    client.post(f"/api/conversations/{conv_id}/handoff/finish")
+    calls_before = len(chain.calls)
+
+    events = parse_sse(
+        client.post(
+            "/api/chat",
+            data={"text": "我的打印机报错E05", "conversation_id": conv_id},
+        ).text
+    )
+    done = event_data(events, "done")
+
+    assert done["trace"].get("handoff_used") is None, "不应再走人工静默分支"
+    assert len(chain.calls) > calls_before, "机器人应恢复作答"
+
+def test_close_conversation_clears_handoff_bar(api_client):
+    """客户在等待人工时自己点「结束会话」：提醒栏也必须被清掉（实测踩过的遗留）。"""
+    client, _, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "我要转人工"}).text)
+    conv_id = client.get("/api/handoffs").json()["items"][0]["id"]
+
+    closed = client.post(f"/api/conversations/{conv_id}/close").json()
+
+    assert closed["handoff_cleared"] is True
+    assert client.get("/api/handoffs").json()["items"] == [], "结束后不应再占用提醒栏"
