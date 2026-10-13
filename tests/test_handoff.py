@@ -438,3 +438,39 @@ def test_clear_active_removes_bar_entry(conn, service, conversation):
 
 def test_clear_active_noop_without_handoff(service, conversation):
     assert service.clear_active(conversation) is False
+
+
+# ---------------------------------------------------------------- V4 修订
+
+def test_cancel_removes_entry_without_touching_ticket(conn, service, conversation):
+    """手动移出提醒：只清提醒，工单与消息都不动。"""
+    service.request(conversation)
+    ticket_before = service._existing_ticket(conversation)
+    status_before = ticket_before["status"]
+
+    outcome = service.cancel(conversation)
+
+    assert outcome["cleared"] is True
+    assert outcome["handoff_state"] == STATE_DONE
+    assert service.pending() == []
+    assert (service._existing_ticket(conversation) or {})["status"] == status_before
+    assert ConversationStore(conn).messages(conversation)
+
+
+def test_cancel_is_noop_when_not_in_bar(service, conversation):
+    outcome = service.cancel(conversation)
+
+    assert outcome["cleared"] is False
+    assert "不在人工提醒栏" in outcome["reason"]
+
+
+def test_cancel_unknown_conversation(service):
+    with pytest.raises(LookupError):
+        service.cancel("conv-missing")
+
+
+def test_finish_notice_tells_customer_ai_takes_over():
+    from app.handoff import FINISH_NOTICE
+
+    assert "AI" in FINISH_NOTICE
+    assert "接管" in FINISH_NOTICE

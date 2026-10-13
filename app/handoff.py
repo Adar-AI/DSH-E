@@ -56,7 +56,7 @@ HANDOFF_NOTICE = "已为你转接人工客服，客服会尽快在这里回复�
 
 # 客服结束会话时同步给客户的系统提示（客户页轮询可见，状态与提示保持一致）
 FINISH_NOTICE = (
-    "本次人工服务已结束。如果还有其他问题，随时在这里继续提问即可（机器人会重新为你服务）。"
+    "本次人工服务已结束，现在由 AI 助手接管对话。还有其他问题，直接在这里提问即可。"
 )
 
 # 人工阶段新增的对话需要重新抽取进工单的字段
@@ -312,6 +312,33 @@ class HandoffService:
             self.tickets.add_timeline_note(int(ticket["id"]), reason)
         logger.info("会话 %s 已结束，自动清理人工提醒", conversation_id)
         return True
+
+    def cancel(self, conversation_id: str, *, reason: str = "客服手动移出转人工提醒") -> dict[str, Any]:
+        """客服手动把某条会话移出「转人工提醒」（只清提醒，不动工单与消息）。
+
+        存在的意义：提醒是"会话级"状态，一旦因为版本未重启、请求失败等原因留下残留，
+        客服需要一条自救通道，而不是只能等人工清库。
+        """
+        conversation = self.store.get(conversation_id)
+        if conversation is None:
+            raise LookupError("会话不存在")
+
+        state = str(conversation.get("handoff_state") or STATE_NONE)
+        if state not in ACTIVE_STATES:
+            return {
+                "conversation_id": conversation_id,
+                "handoff_state": state,
+                "cleared": False,
+                "reason": "该会话当前不在人工提醒栏里",
+            }
+
+        self.clear_active(conversation_id, reason=reason)
+        return {
+            "conversation_id": conversation_id,
+            "handoff_state": STATE_DONE,
+            "cleared": True,
+            "reason": reason,
+        }
 
     # ------------------------------------------------------------------ 内部
 

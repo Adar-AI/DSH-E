@@ -119,7 +119,7 @@
     UI.clear(dom.handoffList);
     state.handoffs.forEach((item) => {
       const waitingSeconds = Number(item.waiting_seconds || 0);
-      const row = el('button', { class: 'handoff-item', type: 'button' }, [
+      const main = el('button', { class: 'handoff-main', type: 'button' }, [
         el('span', {
           class: `badge ${item.handoff_state === 'requested' ? 'badge-danger' : 'badge-warn'}`,
           text: item.handoff_state === 'requested' ? '等待接入' : '人工中',
@@ -131,9 +131,35 @@
           text: `已等待 ${waitingSeconds < 60 ? `${waitingSeconds}s` : `${Math.floor(waitingSeconds / 60)}min`}`,
         }),
       ]);
-      row.addEventListener('click', () => openConversationPanel(item));
-      dom.handoffList.append(row);
+      main.addEventListener('click', () => openConversationPanel(item));
+
+      // 手动移出提醒：只清提醒，不动工单与消息（残留时的自救通道）
+      const clear = el('button', {
+        class: 'handoff-clear',
+        type: 'button',
+        title: '移出提醒（只清提醒，工单与消息保留）',
+        text: '✕',
+      });
+      clear.addEventListener('click', (event) => {
+        event.stopPropagation();
+        cancelHandoff(item);
+      });
+
+      dom.handoffList.append(el('div', { class: 'handoff-item' }, [main, clear]));
     });
+  }
+
+  /** 手动把一条会话移出转人工提醒。 */
+  async function cancelHandoff(item) {
+    const label = item.ticket_no || item.id;
+    if (!window.confirm(`把 ${label} 移出转人工提醒？\n\n只清提醒：工单与聊天记录都会保留。`)) return;
+    try {
+      const outcome = await API.cancelHandoff(item.id);
+      UI.toast(outcome.cleared ? `${label} 已移出提醒` : `${label} 已不在提醒栏`, 'success');
+      loadHandoffs();
+    } catch (error) {
+      UI.toast(`移出提醒失败：${error.message}`, 'error');
+    }
   }
 
   /** 打开某个客户的会话面板（客服与客户双向对话）。 */
@@ -242,7 +268,17 @@
       closeConversationPanel();
       await Promise.all([loadHandoffs(), loadTickets(), refreshOpenedTicket()]);
     } catch (error) {
-      UI.toast(`结束会话失败：${error.message}`, 'error');
+      // 失败也必须刷新提醒栏：若服务端其实已经结束（例如运行中的旧进程没有该接口），
+      // 刷新后这条残留就会消失，而不是一直挂在栏里让人以为没生效。
+      const alreadyDone = /没有进行中的人工服务/.test(error.message || '');
+      UI.toast(
+        alreadyDone
+          ? '该会话的人工服务已结束，正在刷新提醒栏'
+          : `结束会话失败：${error.message}`,
+        alreadyDone ? 'success' : 'error',
+      );
+      if (alreadyDone) closeConversationPanel();
+      await Promise.all([loadHandoffs(), loadTickets()]);
     } finally {
       dom.convFinish.disabled = false;
       dom.convSend.disabled = false;

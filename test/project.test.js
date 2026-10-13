@@ -200,6 +200,9 @@ test('转人工界面元素齐全（V3 F23-F25）', () => {
   // V4：客服处理完毕要能结束会话（从提醒栏移除并同步工单）
   assert.ok(admin.includes('id="conv-finish"'), '工单台缺少「结束会话」按钮');
   assert.ok(adminJs.includes('finishHandoff'), '工单台缺少结束会话逻辑');
+  // 残留自救：提醒行上的手动移出，以及失败时也会刷新提醒栏
+  assert.ok(adminJs.includes('cancelHandoff'), '工单台缺少「移出提醒」逻辑');
+  assert.ok(adminJs.includes('handoff-clear'), '转人工提醒行缺少移出按钮');
 
   const api = read('app/web/js/api.js');
   for (const method of [
@@ -208,6 +211,7 @@ test('转人工界面元素齐全（V3 F23-F25）', () => {
     'agentReply',
     'messagesAfter',
     'finishHandoff',
+    'cancelHandoff',
   ]) {
     assert.ok(api.includes(method), `API 客户端缺少 ${method}`);
   }

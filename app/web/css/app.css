@@ -1345,3 +1345,31 @@ table.tickets tbody tr.active {
   text-align: center;
   color: #15803d;
 }
+/* 转人工提醒行：主体可点击 + 右侧手动移出 */
+.handoff-item { padding: 0; gap: 0; overflow: hidden; }
+.handoff-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+}
+.handoff-main:hover { background: #fff7f7; }
+.handoff-clear {
+  flex: none;
+  width: 30px;
+  align-self: stretch;
+  border: 0;
+  border-left: 1px solid #fecaca;
+  background: transparent;
+  color: #b91c1c;
+  cursor: pointer;
+  font-size: 13px;
+}
+.handoff-clear:hover { background: #fee2e2; }

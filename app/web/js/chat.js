@@ -273,12 +273,22 @@
 
     // 转人工状态同步：待接入/人工中时继续轮询客服回复（刷新页面也能恢复）
     state.handoffState = conversation.handoff_state || 'none';
-    if (state.handoffState === 'none' || conversation.status === 'closed') {
+    if (state.handoffState === 'none') {
       stopPolling();
-    } else {
+      return;
+    }
+    if (state.handoffState === 'requested' || state.handoffState === 'claimed') {
       dom.infoStatus.textContent = state.handoffState === 'claimed' ? '人工客服处理中' : '等待人工接入';
       dom.infoStatus.className = 'badge badge-warn';
       startPolling();
+      return;
+    }
+    // done：人工服务已结束，停止轮询，但**先把最后一条消息拉回来**
+    // （结束时的「现在由 AI 助手接管对话」提示就在这条增量里，漏掉客户就看不到）
+    if (state.handoffState === 'done') {
+      pollMessages().finally(stopPolling);
+    } else {
+      stopPolling();
     }
   }
 

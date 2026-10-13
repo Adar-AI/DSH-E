@@ -165,6 +165,23 @@ def finish_handoff(
         conn.close()
 
 
+@router.post("/conversations/{conversation_id}/handoff/cancel")
+def cancel_handoff(
+    conversation_id: str,
+    reason: str = Query("客服手动移出转人工提醒"),
+):
+    """客服手动把会话移出「转人工提醒」（只清提醒，不动工单与消息）。"""
+
+    @_with_handoff
+    def handler(handoff: HandoffService, store: ConversationStore):
+        try:
+            return handoff.cancel(conversation_id, reason=reason)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return handler()
+
+
 @router.get("/handoffs/history")
 def handoff_history(limit: int = Query(20, ge=1, le=100)):
     """最近已结束人工服务的会话（工单台回看用；提醒栏不展示）。"""

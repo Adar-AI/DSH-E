@@ -557,3 +557,38 @@ def test_close_conversation_clears_handoff_bar(api_client):
 
     assert closed["handoff_cleared"] is True
     assert client.get("/api/handoffs").json()["items"] == [], "结束后不应再占用提醒栏"
+
+
+def test_cancel_handoff_endpoint(api_client):
+    """客服手动移出提醒的接口（残留自救通道）。"""
+    client, _, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "我要转人工"}).text)
+    conv_id = client.get("/api/handoffs").json()["items"][0]["id"]
+
+    outcome = client.post(f"/api/conversations/{conv_id}/handoff/cancel").json()
+
+    assert outcome["cleared"] is True
+    assert client.get("/api/handoffs").json()["items"] == []
+
+
+def test_cancel_handoff_missing_conversation_returns_404(api_client):
+    client, _, _ = api_client
+    assert client.post("/api/conversations/conv-missing/handoff/cancel").status_code == 404
+
+
+def test_finish_notice_reaches_customer_messages(api_client):
+    """结束人工后，客户侧必须能拿到「AI 接管」提示（轮询增量里）。"""
+    client, _, _ = api_client
+    parse_sse(client.post("/api/chat", data={"text": "转人工"}).text)
+    conv_id = client.get("/api/handoffs").json()["items"][0]["id"]
+    before = client.get(f"/api/conversations/{conv_id}/messages").json()["items"]
+
+    client.post(f"/api/conversations/{conv_id}/handoff/finish", params={"sync_fields": False})
+
+    incremental = client.get(
+        f"/api/conversations/{conv_id}/messages", params={"after_id": before[-1]["id"]}
+    ).json()["items"]
+    assert any(
+        entry["role"] == "system" and "AI" in entry["text"] and "接管" in entry["text"]
+        for entry in incremental
+    ), f"增量里没有 AI 接管提示：{incremental}"

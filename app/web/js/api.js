@@ -115,6 +115,11 @@ const API = (() => {
       }),
     handoffs: () => request('/api/handoffs'),
     handoffHistory: (limit = 20) => request(`/api/handoffs/history${buildQuery({ limit })}`),
+    cancelHandoff: (id, reason = '客服手动移出转人工提醒') =>
+      request(
+        `/api/conversations/${encodeURIComponent(id)}/handoff/cancel${buildQuery({ reason })}`,
+        { method: 'POST' },
+      ),
     finishHandoff: (id, { operator = '客服', syncFields = true } = {}) =>
       request(
         `/api/conversations/${encodeURIComponent(id)}/handoff/finish` +
